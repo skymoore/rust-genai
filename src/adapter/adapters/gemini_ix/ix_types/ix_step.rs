@@ -127,6 +127,7 @@ impl IxStep {
 				call_id,
 				fn_name: name,
 				content: ix_result_to_string(result),
+				images: Vec::new(),
 			})],
 
 			IxStep::UserInput | IxStep::Other => Vec::new(),
