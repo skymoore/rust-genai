@@ -1,4 +1,5 @@
 use super::ToolCall;
+use crate::chat::Binary;
 use serde::{Deserialize, Serialize};
 
 /// Response produced by a tool invocation, paired with the originating tool call ID.
@@ -15,6 +16,9 @@ pub struct ToolResponse {
 	/// Tool output payload as a string. Providers may use JSON-serialized content.
 	// For now, just a string (would probably be serialized JSON)
 	pub content: String,
+	/// Images the tool produced, e.g. screenshots; carried inside the tool result where the provider allows it.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub images: Vec<Binary>,
 }
 
 /// Constructor
@@ -25,6 +29,7 @@ impl ToolResponse {
 			call_id: tool_call_id.into(),
 			fn_name: None,
 			content: content.into(),
+			images: Vec::new(),
 		}
 	}
 
@@ -34,12 +39,19 @@ impl ToolResponse {
 			call_id: tool_call.call_id.clone(),
 			fn_name: Some(tool_call.fn_name.clone()),
 			content: content.into(),
+			images: Vec::new(),
 		}
 	}
 
 	/// Attach the function/tool name to this response.
 	pub fn with_fn_name(mut self, fn_name: impl Into<String>) -> Self {
 		self.fn_name = Some(fn_name.into());
+		self
+	}
+
+	/// Attach images (e.g. screenshots) produced by the tool to this response.
+	pub fn with_images(mut self, images: Vec<Binary>) -> Self {
+		self.images = images;
 		self
 	}
 }

@@ -1,8 +1,8 @@
 use super::{OpenAIAdapter, ToWebRequestDataOptions};
 use crate::adapter::AdapterKind;
 use crate::chat::{
-	CacheControl, ChatMessage, ChatOptions, ChatOptionsSet, ChatRequest, ContentPart, MessageContent, Tool, ToolCall,
-	ToolChoice,
+	Binary, CacheControl, ChatMessage, ChatOptions, ChatOptionsSet, ChatRequest, ContentPart, MessageContent, Tool,
+	ToolCall, ToolChoice, ToolResponse,
 };
 use crate::resolver::{AuthData, Endpoint};
 use crate::{ModelIden, ServiceTarget};
@@ -557,6 +557,47 @@ fn test_managed_body_thinking_uses_model_name_derived_effort() -> Result<()> {
 }
 
 // endregion: --- Managed Thinking
+
+// region:    --- Tool Response Images
+
+/// Tool messages are text-only in OpenAI, so tool-produced images must trail as one user message.
+#[test]
+fn test_tool_response_images_trail_as_user_image_message() -> Result<()> {
+	// -- Setup & Fixtures
+	let tool_call = ToolCall {
+		call_id: "call_1".to_string(),
+		fn_name: "screenshot".to_string(),
+		fn_arguments: json!({}),
+		thought_signatures: None,
+	};
+	let tool_response = ToolResponse::from_tool_call(&tool_call, "screenshot 800x600 attached")
+		.with_images(vec![Binary::from_base64("image/png", "aGVsbG8=", None)]);
+	let chat_req = ChatRequest::new(vec![
+		ChatMessage::assistant(MessageContent::from_parts(vec![ContentPart::ToolCall(tool_call)])),
+		ChatMessage::from(tool_response),
+	]);
+
+	// -- Exec
+	let parts = OpenAIAdapter::into_openai_request_parts(&test_model(), chat_req, None)?;
+
+	// -- Check
+	assert_eq!(parts.messages.len(), 3);
+	assert_eq!(parts.messages[1]["role"], "tool");
+	assert_eq!(parts.messages[1]["content"], "screenshot 800x600 attached");
+	assert_eq!(parts.messages[2]["role"], "user");
+	let image_parts = parts.messages[2]["content"]
+		.as_array()
+		.ok_or_else(|| std::io::Error::other("trailing user content should be an array"))?;
+	assert_eq!(image_parts.len(), 1);
+	assert_eq!(
+		image_parts[0],
+		json!({"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}})
+	);
+
+	Ok(())
+}
+
+// endregion: --- Tool Response Images
 
 // region:    --- Support
 

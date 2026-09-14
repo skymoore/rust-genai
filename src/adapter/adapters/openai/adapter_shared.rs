@@ -483,14 +483,24 @@ impl OpenAIAdapter {
 
 				// Tool - For now, support only tool responses
 				ChatRole::Tool => {
+					// OpenAI tool messages are text-only; images the tool produced trail as one user
+					// message of `image_url` parts so the model can still see them.
+					let mut image_parts: Vec<Value> = Vec::new();
 					for part in msg.content {
 						if let ContentPart::ToolResponse(tool_response) = part {
 							messages.push(json!({
 								"role": "tool",
 								"content": tool_response.content,
 								"tool_call_id": tool_response.call_id,
-							}))
+							}));
+							for image in tool_response.images {
+								let image_url = image.into_url();
+								image_parts.push(json!({"type": "image_url", "image_url": {"url": image_url}}));
+							}
 						}
+					}
+					if !image_parts.is_empty() {
+						messages.push(json!({"role": "user", "content": image_parts}));
 					}
 
 					// TODO: Probably need to trace/warn that this will be ignored

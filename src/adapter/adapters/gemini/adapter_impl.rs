@@ -810,6 +810,26 @@ impl GeminiAdapter {
 										}
 									}
 								}));
+								// Tool-produced images ride along as inline_data parts of the same turn.
+								for Binary {
+									content_type, source, ..
+								} in tool_response.images
+								{
+									match source {
+										BinarySource::Url(url) => parts_values.push(json!({
+											"file_data": {
+												"mime_type": content_type,
+												"file_uri": url
+											}
+										})),
+										BinarySource::Base64(content) => parts_values.push(json!({
+											"inline_data": {
+												"mime_type": content_type,
+												"data": content
+											}
+										})),
+									}
+								}
 							}
 							ContentPart::ThoughtSignature(thought) => {
 								parts_values.push(json!({
@@ -915,15 +935,20 @@ impl GeminiAdapter {
 }
 
 impl GeminiAdapter {
-	/// Merge consecutive "user" entries that contain only functionResponse parts
-	/// into a single entry. Gemini requires all function responses in one turn.
+	/// Merge consecutive "user" entries that contain only functionResponse parts (plus any
+	/// tool-produced image parts) into a single entry. Gemini requires all function responses in one turn.
 	fn merge_consecutive_tool_response_entries(contents: Vec<Value>) -> Vec<Value> {
 		fn is_tool_response_entry(entry: &Value) -> bool {
 			if entry.get("role").and_then(|r| r.as_str()) != Some("user") {
 				return false;
 			}
 			if let Some(parts) = entry.get("parts").and_then(|p| p.as_array()) {
-				!parts.is_empty() && parts.iter().all(|p| p.get("functionResponse").is_some())
+				!parts.is_empty()
+					&& parts.iter().all(|p| {
+						p.get("functionResponse").is_some()
+							|| p.get("inline_data").is_some()
+							|| p.get("file_data").is_some()
+					})
 			} else {
 				false
 			}

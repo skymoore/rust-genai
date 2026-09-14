@@ -230,6 +230,48 @@ fn test_assistant_thinking_signature_serializes_before_tool_use() {
 }
 
 #[test]
+fn test_tool_response_images_serialize_inside_tool_result() {
+	let tool_call = ToolCall {
+		call_id: "call-1".to_string(),
+		fn_name: "screenshot".to_string(),
+		fn_arguments: json!({}),
+		thought_signatures: None,
+	};
+	let tool_response = ToolResponse::from_tool_call(&tool_call, "screenshot 800x600 attached")
+		.with_images(vec![Binary::from_base64("image/png", "aGVsbG8=", None)]);
+	let req = ChatRequest::new(vec![
+		ChatMessage::assistant(MessageContent::from_parts(vec![ContentPart::ToolCall(tool_call)])),
+		ChatMessage::from(tool_response),
+	]);
+	let target = ServiceTarget {
+		endpoint: AnthropicAdapter::default_endpoint(AdapterKind::Anthropic),
+		auth: AuthData::from_single("test-key"),
+		model: ModelIden::new(AdapterKind::Anthropic, "fixture-model"),
+	};
+
+	let web_req = AnthropicAdapter::to_web_request_data(
+		target,
+		ServiceType::Chat,
+		req,
+		ChatOptionsSet::default().with_chat_options(None),
+	)
+	.expect("to_web_request_data should succeed");
+
+	let tool_result = &web_req.payload["messages"][1]["content"][0];
+	assert_eq!(tool_result["type"], "tool_result");
+	assert_eq!(tool_result["tool_use_id"], "call-1");
+	let blocks = tool_result["content"].as_array().expect("tool_result content array");
+	assert_eq!(blocks.len(), 2);
+	assert_eq!(
+		blocks[0],
+		json!({"type": "text", "text": "screenshot 800x600 attached"})
+	);
+	assert_eq!(blocks[1]["type"], "image");
+	assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+	assert_eq!(blocks[1]["source"]["data"], "aGVsbG8=");
+}
+
+#[test]
 fn test_non_stream_multiple_thinking_blocks_round_trip_without_flattening() {
 	let response = AnthropicAdapter::build_chat_response(
 		ModelIden::new(AdapterKind::Anthropic, "fixture-model"),

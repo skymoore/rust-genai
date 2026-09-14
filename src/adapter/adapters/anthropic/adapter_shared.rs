@@ -7,8 +7,8 @@ use crate::adapter::{Adapter, AdapterKind, ServiceType, WebRequestData};
 use crate::chat::{
 	Binary, BinarySource, CacheControl, CacheCreationDetails, ChatOptionsSet, ChatRequest, ChatResponse,
 	ChatResponseFormat, ChatRole, CompletionTokensDetails, ContentPart, JsonSchemaDialect, MessageContent,
-	PromptTokensDetails, ReasoningEffort, StopReason, Tool, ToolCall, ToolChoice, ToolConfig, ToolName, Usage,
-	sanitize_json_schema,
+	PromptTokensDetails, ReasoningEffort, StopReason, Tool, ToolCall, ToolChoice, ToolConfig, ToolName, ToolResponse,
+	Usage, sanitize_json_schema,
 };
 use crate::resolver::{AuthData, Endpoint};
 use crate::webc::{WebClient, WebResponse};
@@ -243,11 +243,7 @@ impl AnthropicAdapter {
 								// ToolCall is not valid in user content for Anthropic; skip gracefully.
 								ContentPart::ToolCall(_tc) => {}
 								ContentPart::ToolResponse(tool_response) => {
-									values.push(json!({
-										"type": "tool_result",
-										"content": tool_response.content,
-										"tool_use_id": tool_response.call_id,
-									}));
+									values.push(tool_result_to_json(tool_response));
 								}
 								ContentPart::ThoughtSignature(_) => {}
 								ContentPart::ReasoningContent(_) => {}
@@ -368,11 +364,7 @@ impl AnthropicAdapter {
 					for part in msg.content {
 						match part {
 							ContentPart::ToolResponse(tool_response) => {
-								values.push(json!({
-									"type": "tool_result",
-									"content": tool_response.content,
-									"tool_use_id": tool_response.call_id,
-								}));
+								values.push(tool_result_to_json(tool_response));
 							}
 							ContentPart::Custom(custom_part) => values.push(custom_part.data),
 							_ => {}
@@ -887,6 +879,59 @@ fn apply_cache_control_to_parts(cache_control: Option<&CacheControl>, parts: Vec
 		}
 	}
 	parts
+}
+
+/// Convert a ToolResponse into an Anthropic `tool_result` block.
+///
+/// With no images the `content` is the plain string; with images it becomes a block list of
+/// the text (when non-empty) followed by one base64 `image` block per image. URL-sourced
+/// images are skipped like in user messages, since Anthropic does not accept image URLs.
+fn tool_result_to_json(tool_response: ToolResponse) -> Value {
+	let ToolResponse {
+		call_id,
+		content,
+		images,
+		..
+	} = tool_response;
+
+	if images.is_empty() {
+		return json!({
+			"type": "tool_result",
+			"content": content,
+			"tool_use_id": call_id,
+		});
+	}
+
+	let mut blocks: Vec<Value> = Vec::with_capacity(images.len() + 1);
+	if !content.is_empty() {
+		blocks.push(json!({"type": "text", "text": content}));
+	}
+	for Binary {
+		content_type, source, ..
+	} in images
+	{
+		match source {
+			BinarySource::Url(_) => {
+				warn!("Anthropic doesn't support images from URL, need to handle it gracefully");
+			}
+			BinarySource::Base64(data) => {
+				blocks.push(json!({
+					"type": "image",
+					"source": {
+						"type": "base64",
+						"media_type": content_type,
+						"data": data,
+					}
+				}));
+			}
+		}
+	}
+
+	json!({
+		"type": "tool_result",
+		"content": blocks,
+		"tool_use_id": call_id,
+	})
 }
 
 fn anthropic_tool_choice(tool_choice: Option<&ToolChoice>) -> Option<Value> {
