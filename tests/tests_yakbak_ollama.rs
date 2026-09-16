@@ -35,9 +35,7 @@ async fn test_yakbak_ollama_ndjson_multi_event_stream() -> TestResult<()> {
 		.with_capture_usage(true);
 
 	// -- Exec
-	let stream_res = client
-		.exec_chat_stream("ollama::qwen3", chat_req, Some(&options))
-		.await?;
+	let stream_res = client.exec_chat_stream("ollama::qwen3", chat_req, Some(&options)).await?;
 	let extract = extract_stream_end(stream_res.stream).await?;
 
 	// -- Check: every content/reasoning field must surface, including the
@@ -68,11 +66,7 @@ async fn test_yakbak_ollama_ndjson_multi_event_stream() -> TestResult<()> {
 		.captured_tool_calls()
 		.ok_or("tool calls should be captured")?;
 	assert_eq!(captured_tcs.len(), 3);
-	let usage = extract
-		.stream_end
-		.captured_usage
-		.as_ref()
-		.ok_or("usage should be captured")?;
+	let usage = extract.stream_end.captured_usage.as_ref().ok_or("usage should be captured")?;
 	assert_eq!(usage.prompt_tokens, Some(21));
 	assert_eq!(usage.completion_tokens, Some(40));
 	assert_eq!(usage.total_tokens, Some(61));
@@ -91,12 +85,12 @@ async fn test_yakbak_ollama_ndjson_multi_event_order() -> TestResult<()> {
 	let (client, _server) = replay_client("ollama", "ndjson_multi_event_stream").await?;
 
 	let chat_req = ChatRequest::from_user("Why is the sky blue? And what is the weather in Paris?");
-	let options = ChatOptions::default().with_capture_content(true).with_capture_reasoning_content(true);
+	let options = ChatOptions::default()
+		.with_capture_content(true)
+		.with_capture_reasoning_content(true);
 
 	// -- Exec
-	let stream_res = client
-		.exec_chat_stream("ollama::qwen3", chat_req, Some(&options))
-		.await?;
+	let stream_res = client.exec_chat_stream("ollama::qwen3", chat_req, Some(&options)).await?;
 	let mut stream = stream_res.stream;
 
 	let mut labels = Vec::new();
