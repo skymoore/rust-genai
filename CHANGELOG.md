@@ -21,6 +21,8 @@
 
 ### Behavior Refinement / Changes
 
+- Chat:
+  - `-` Preserve each tool call's thought signatures when converting `Vec<ToolCall>` into an assistant message, avoiding duplicate OpenAI Responses reasoning items and incorrect Gemini signature pairing. ([#306](https://github.com/jeremychone/rust-genai/issues/306)) (PR #307)
 - Anthropic:
   - `Zero` now positively disables reasoning, whereas it previously triggered adaptive thinking.
   - Sonnet 5 sends `thinking: {"type": "disabled"}`, because thinking is on by default.
@@ -36,6 +38,8 @@
   - `^` Apply the `ReasoningEffort::Zero` rename to OpenAI and Bedrock adapter mappings while preserving provider-specific keyword mappings.
 - Client:
   - `-` Apply `ServiceTargetResolver` when resolving adapter config in `Client::all_model_names()`. (PR #288)
+- Bedrock:
+  - `^` `bedrock_sigv4` now reads `AuthData` as an AWS profile name, rather than ignoring it; a shared `AuthResolver` that returns a non-profile value for every adapter now triggers a profile lookup. (PR #310)
 
 ### New Providers
 
@@ -56,7 +60,7 @@
   - Exposes `genai::adapter::gemini_ix` helper types (`EnrichedEvent`, `UrlCitation`, `GroundingToolCount`) for decoding search grounding citations and server-side tool metadata via `ChatFrameSink`.
 
 ### Additions & Fixes
- 
+
 - `-` ChatOptions - Allow partial deserialization without `stop_sequences`, defaulting it to an empty vector. (PR #285)
 - `+` Adapter - Add `AdapterKind::all()` to enumerate built-in adapters, excluding `Custom`. (PR #286)
 - `+` Error - Add `Error::status()` and `webc::Error::status()` accessors for HTTP status inspection. (PR #287)
@@ -91,10 +95,18 @@
   - `-` Protect known model names such as `deepseek-r1-zero` from reasoning suffix stripping by using a whitelist in `from_model_name()`.
 - Bedrock:
   - `-` Fix Bedrock streamer to queue and preserve frame events after `Start`, preventing dropped text deltas or tool-call chunks from the initial frame. (PR #297)
+  - `-` Refresh SigV4 credentials before they expire instead of caching the first `provide_credentials()` snapshot for the life of the process, mirroring the AWS SDK identity cache (10s early refresh, 15-minute default TTL, deduplicated refreshes, jitter), so long-lived processes stop failing with signature errors. (PR #308)
+  - `-` Accept `AWS_BEARER_TOKEN_BEDROCK` as a fallback for `BEDROCK_API_KEY` in the `bedrock_api` adapter, with an empty value falling through to the next candidate; an explicit `AuthData` is still used as-is. (PR #308)
+  - `-` Build the `bedrock_sigv4` request URL for the region that is signed, fixing `SignatureDoesNotMatch` when the region comes from `~/.aws/config` or IMDS; user-supplied endpoints (VPC endpoint, proxy, gateway) are left untouched. (PR #308)
+  - `+` Select the AWS profile per client in `bedrock_sigv4` via `AuthData` (`Key("<profile>")`, `FromEnv("<VAR>")`, or `MultiKeys({ "profile": "<name>" })`); `None` or a blank value keeps the ambient chain (`AWS_PROFILE`, else `default`). The credential cache is now per profile, each keeping its own provider, region, and credentials, refreshed before expiry; same-profile concurrent refreshes are no longer deduplicated, since the lock is not held across a fetch (one profile's slow fetch does not block another). (PR #310)
+- Ollama:
+  - `+` Map `ChatOptions::reasoning_effort` to Ollama's top-level `think` body param: `Zero` -> `false`, `Minimal`/`Low` -> `"low"`, `Medium` -> `"medium"`, `High` -> `"high"`, `XHigh`/`Max` -> `"max"`, `Budget(_)` -> `true` (model default level); the param is omitted when unset. (PR #312)
+  - `-` Emit every event-bearing field of an NDJSON line instead of only the first, so fields sharing a line (e.g., `thinking` + `content`), every tool call of a line, and every line of a web chunk are no longer dropped. Events are buffered in stream order and drained before polling the inner stream, and the queued `End` event preserves the final `done` line's events, `done_reason`, and usage captures. (PR #311)
 - Cross-provider adapters:
   - `^` Move messages after tools in JSON payloads for better prompt cache utilization. (PR #262)
 - OpenTelemetry:
   - `-` Fix `otel` feature compilation, by covering the `CacheBreakpointNoEligibleContent` error variant in the `error.type` derivation (broken since v0.7.0-beta.18).
+  - `-` Cover `Error::ClientBuildFail` in the `error.type` derivation, fixing `otel` compilation when `bedrock-sigv4` is enabled. (PR #310)
   - `+` Add optional OpenTelemetry GenAI semantic-convention instrumentation behind the new `otel` feature, off by default, using a pure `tracing` bridge with no extra dependencies.
     - Auto-instruments `exec_chat`, `exec_chat_stream`, and `exec_embed` as `gen_ai.*` spans, including operation, provider, request params, server address/port, usage tokens, finish reasons, response id/model, streaming time-to-first-chunk, and `error.type`. Prompt and response content capture is opt-in via `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT`. Adds opt-in `genai::otel` helpers for agent, workflow, and tool spans, plus the evaluation-result event. Export by wiring `tracing-opentelemetry` in the application. See `docs/otel.md` and `examples/c12-otel.rs`.
 

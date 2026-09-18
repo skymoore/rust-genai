@@ -108,22 +108,24 @@ When sending subsequent requests, `Custom` parts whose type begins with `reasoni
 - OpenAI Responses: Streaming `error` events are now surfaced as `Error::ChatResponse` with the provider error payload, cleanly terminating the stream.
 - Bedrock: The Bedrock streamer now queues and delivers all events decoded from initial frames, ensuring text deltas or tool-call chunks emitted in the same frame as stream start are not dropped.
 
-### Bedrock profile selection (fork backport)
+### `bedrock_sigv4` reads `AuthData` as an AWS profile
 
-With `bedrock-sigv4` enabled, `AuthData::Key("work".into())` selects the AWS
-profile `work`. `FromEnv` and `MultiKeys` with a `profile` entry also work.
-Explicit profiles use the AWS SDK's profile credentials provider, so ambient
-access keys cannot override the selected account. `AuthData::None` keeps the
-default AWS credential chain (`AWS_PROFILE`, otherwise `default`). The SDK's
-region precedence remains unchanged: `AWS_REGION` overrides profile region.
+The `bedrock_sigv4` adapter now interprets the resolved `AuthData` as an AWS profile name, so a caller can pick the account per client:
 
-Credentials are cached per profile and refreshed before expiry; the default
-endpoint uses the signing region. The bearer adapter also accepts
-`AWS_BEARER_TOKEN_BEDROCK` when `BEDROCK_API_KEY` is unset or empty.
+```rust
+let dev = Client::builder()
+    .append_provider_config(AdapterKind::BedrockSigv4, AuthData::Key("dev".to_string()))
+    .build()?;
+```
 
-Previously SigV4 ignored `AuthData`, so resolvers returning an API key for every
-adapter must now return a profile name or `AuthData::None` for Bedrock SigV4.
-This backports upstream `a120cb8` without dropping this fork's tool-image support.
+`Key("<profile>")`, `FromEnv("<VAR>")`, and `MultiKeys({ "profile": "<name>" })` are all supported. `None` or a blank value keeps the ambient chain (`AWS_PROFILE`, else `default`), and `RequestOverride` is unchanged. Credentials are now cached per profile, so each profile keeps its own provider, region, and credentials.
+
+Previously this adapter ignored `AuthData` and resolved the profile once per process, so a shared `AuthResolver` that returns a non-profile value for every adapter now triggers a profile lookup here.
+
+In this fork, explicit profiles use the SDK's `ProfileFileCredentialsProvider`,
+so ambient access keys cannot override the selected account. `None` keeps the
+full default credential chain. Region precedence is unchanged: `AWS_REGION`
+overrides profile region.
 
 ## Additive Features
 

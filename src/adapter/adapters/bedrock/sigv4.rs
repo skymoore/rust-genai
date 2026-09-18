@@ -13,10 +13,7 @@
 //! the lock is never held across a fetch, so one profile's slow fetch does not block another.
 //! Without the cache, a long-lived process would keep signing with credentials that expired an hour after start-up
 //! (`provide_credentials()` returns a frozen snapshot).
-//!
-//! Backported from upstream rust-genai `a120cb8` (per-profile cache and refresh), preserving
-//! this fork's tool-image support. `load_aws_config`/`profile_credentials` additionally keep
-//! an explicit profile from losing to ambient environment credentials.
+
 
 use super::shared::{DEFAULT_REGION, region_from_env};
 use crate::Headers;
@@ -198,7 +195,6 @@ fn profile_credentials(profile: &str, region: &str) -> aws_config::profile::cred
 		.configure(&conf)
 		.profile_name(profile)
 }
-
 /// Credential-resolution failure, naming the profile when the caller selected one.
 fn creds_err(profile: Option<&str>, err: impl std::fmt::Display) -> Error {
 	let for_profile = profile.map(|profile| format!(" for profile '{profile}'")).unwrap_or_default();
@@ -501,7 +497,6 @@ mod tests {
 	}
 
 	// endregion: --- Explicit profile (wth)
-
 	// region:    --- Cache behavior
 
 	/// Hands out fixed credentials and counts how often it was asked, so a test can tell a cached

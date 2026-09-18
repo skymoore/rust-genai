@@ -31,6 +31,7 @@ _If I forgot your PR, feel free to submit a PR_
   - [#302](https://github.com/jeremychone/rust-genai/pull/302) fix(gemini): keep a thoughtSignature next to the part it arrived on
   - [#301](https://github.com/jeremychone/rust-genai/pull/301) fix(openai): capture OpenRouter's reasoning_details and echo them on assistant messages
 - [emecii](https://github.com/emecii)
+  - [#307](https://github.com/jeremychone/rust-genai/pull/307) fix(chat): preserve per-call thought signatures
   - [#297](https://github.com/jeremychone/rust-genai/pull/297) fix(bedrock): preserve frame events after start
   - [#296](https://github.com/jeremychone/rust-genai/pull/296) fix(openai_resp): propagate streaming error events
 - [lambdabetaeta](https://github.com/lambdabetaeta)
@@ -42,6 +43,12 @@ _If I forgot your PR, feel free to submit a PR_
 - [VikashLoomba](https://github.com/VikashLoomba)
   - [#280](https://github.com/jeremychone/rust-genai/pull/280) feat(webc): expose response headers on streaming HTTP errors
   - [#278](https://github.com/jeremychone/rust-genai/pull/278) fix(otel): cover `CacheBreakpointNoEligibleContent` in `error.type` derivation
+- [wdwind](https://github.com/wdwind)
+  - [#310](https://github.com/jeremychone/rust-genai/pull/310) feat(bedrock_sigv4): select the AWS profile per client via `AuthData`
+  - [#308](https://github.com/jeremychone/rust-genai/pull/308) fix(bedrock): refresh SigV4 credentials before expiry, accept `AWS_BEARER_TOKEN_BEDROCK`, and sign for the region the request URL targets
+- [dmfs](https://github.com/dmfs)
+  - [#312](https://github.com/jeremychone/rust-genai/pull/312) feat(ollama): map ReasoningEffort to the think body param
+  - [#311](https://github.com/jeremychone/rust-genai/pull/311) fix(ollama): emit every event of an ndjson line instead of dropping the extras
 - [Alb-O](https://github.com/Alb-O)
   - [#243](https://github.com/jeremychone/rust-genai/pull/243) derive PartialEq/Eq for Usage and nested structs
 - [holovskyi](https://github.com/holovskyi) 
@@ -56,6 +63,7 @@ _If I forgot your PR, feel free to submit a PR_
   - [#271](https://github.com/jeremychone/rust-genai/pull/271) map Anthropic ping events to `ChatStreamEvent::Heartbeat`
 - [CristiC0](https://github.com/CristiC0)
   - [#279](https://github.com/jeremychone/rust-genai/pull/279) fix(anthropic): align stream usage capture with new Anthropic API behaviour
+
 
 ## v0.6.0..0.6.x
 

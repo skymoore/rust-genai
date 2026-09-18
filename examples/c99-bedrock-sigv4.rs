@@ -5,15 +5,18 @@
 //!
 //! Credentials come from the AWS default chain: environment variables, shared credentials file,
 //! SSO session, IMDS, or an assumed role. No `API key` is needed — set up AWS credentials the
-//! same way you would for the AWS CLI.
+//! same way you would for the AWS CLI. Temporary credentials are refreshed before they expire.
 //!
 //! Run with: `cargo run --example c99-bedrock-sigv4 --features bedrock-sigv4`
 //!
 //! Required env vars (any of these set up via `aws configure` / SSO / IAM role / etc.):
 //!   - AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (+ AWS_SESSION_TOKEN for STS credentials), OR
-//!   - AWS_PROFILE pointing at a profile in ~/.aws/credentials, OR
+//!   - AWS_PROFILE naming a profile in ~/.aws/config or ~/.aws/credentials, OR
 //!   - IMDS (on EC2 / ECS / EKS), OR
 //!   - SSO session
+//!
+//! The profile can also be selected in code, per client, via `AuthData::Key("<profile>")` in
+//! `ClientBuilder::append_provider_config(AdapterKind::BedrockSigv4, ..)`.
 //!
 //! Optional:
 //!   - AWS_REGION / AWS_DEFAULT_REGION: defaults to `us-east-1`. Model availability varies by
