@@ -152,6 +152,8 @@ let dev = Client::builder()
 
 Previously this adapter ignored `AuthData` and resolved the profile once per process, so a shared `AuthResolver` that returns a non-profile value for every adapter now triggers a profile lookup here.
 
+Fork addition: an explicit profile uses the AWS SDK's profile credentials provider alone, so ambient access keys (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`) cannot override the selected account. The SDK's region precedence is unchanged: `AWS_REGION` overrides the profile's region.
+
 ## Additive Features
 
 ### Declarative provider configuration on `ClientBuilder`
