@@ -1,9 +1,10 @@
 //! SigV4 signing + credential resolution for Bedrock.
 //!
-//! Credentials come from `aws-config`'s default chain (env → profile → SSO → IMDS → AssumeRole) and
-//! are cached per AWS profile until shortly before they expire; signing is per-request via
-//! `aws-sigv4`. The profile is selected per client as `AuthData::Key("<profile>")` (see
-//! [`profile_from_auth`]); `AuthData::None` follows `AWS_PROFILE`, else `default`.
+//! Credentials come from `aws-config` and are cached per AWS profile until shortly before they
+//! expire; signing is per-request via `aws-sigv4`. The profile is selected per client as
+//! `AuthData::Key("<profile>")` (see [`profile_from_auth`]); `AuthData::None` follows the default
+//! chain (env → `AWS_PROFILE`/`default` profile → SSO → IMDS → AssumeRole), while an explicit
+//! profile reads the profile files alone (see [`load_aws_config`]).
 //!
 //! The cache mirrors the AWS SDK's identity cache: expire `REFRESH_BUFFER` early, fall back to
 //! `DEFAULT_EXPIRATION` when no expiry is reported, and jitter to avoid lockstep.
@@ -12,6 +13,9 @@
 //! the lock is never held across a fetch, so one profile's slow fetch does not block another.
 //! Without the cache, a long-lived process would keep signing with credentials that expired an hour after start-up
 //! (`provide_credentials()` returns a frozen snapshot).
+//!
+//! Fork addition over upstream: `load_aws_config`/`profile_credentials` keep an explicit profile
+//! from losing to ambient environment credentials.
 
 use super::shared::{DEFAULT_REGION, region_from_env};
 use crate::Headers;
@@ -146,14 +150,16 @@ pub(super) fn profile_from_auth(auth: &AuthData) -> Result<ProfileKey> {
 }
 
 /// Loads `aws-config`'s chain for `profile`, returning `(provider, region)`.
+///
+/// The region always comes from the SDK's profile-aware chain (`AWS_REGION` → the profile's
+/// `region` → IMDS). Credentials differ by selector:
+///
+/// - `None` keeps the full default chain.
+/// - `Some(profile)` reads the profile files only (see [`profile_credentials`]), so a selected
+///   profile cannot lose to ambient `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, which the default
+///   chain consults before any profile even when `profile_name` is set.
 async fn load_aws_config(profile: Option<&str>) -> Result<(SharedCredentialsProvider, String)> {
-	use aws_config::BehaviorVersion;
-
-	let mut loader = aws_config::defaults(BehaviorVersion::latest());
-	if let Some(profile) = profile {
-		loader = loader.profile_name(profile);
-	}
-	let config = loader.load().await;
+	let config = config_loader(profile).load().await;
 
 	let region = config
 		.region()
@@ -161,11 +167,35 @@ async fn load_aws_config(profile: Option<&str>) -> Result<(SharedCredentialsProv
 		.or_else(region_from_env)
 		.unwrap_or_else(|| DEFAULT_REGION.to_string());
 
-	let provider = config
-		.credentials_provider()
-		.ok_or_else(|| aws_err("AWS credentials (no provider found in default chain)"))?;
+	let provider = match profile {
+		Some(profile) => SharedCredentialsProvider::new(profile_credentials(profile, &region).build()),
+		None => config
+			.credentials_provider()
+			.ok_or_else(|| aws_err("AWS credentials (no provider found in default chain)"))?,
+	};
 
 	Ok((provider, region))
+}
+
+/// The SDK config loader for `profile`; `None` follows `AWS_PROFILE`, else `default`.
+fn config_loader(profile: Option<&str>) -> aws_config::ConfigLoader {
+	let loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
+	match profile {
+		Some(profile) => loader.profile_name(profile),
+		None => loader,
+	}
+}
+
+/// Credentials for an explicitly selected `profile`, from the AWS profile files alone: static keys,
+/// `source_profile`/`role_arn` (assumed in `region`), SSO, and `credential_process`.
+fn profile_credentials(profile: &str, region: &str) -> aws_config::profile::credentials::Builder {
+	use aws_config::provider_config::ProviderConfig;
+
+	// The STS client behind `role_arn` takes its region from this config; without one it fails.
+	let conf = ProviderConfig::without_region().with_region(Some(aws_config::Region::new(region.to_owned())));
+	aws_config::profile::ProfileFileCredentialsProvider::builder()
+		.configure(&conf)
+		.profile_name(profile)
 }
 
 /// Credential-resolution failure, naming the profile when the caller selected one.
@@ -413,6 +443,63 @@ mod tests {
 	}
 
 	// endregion: --- Errors
+
+	// region:    --- Explicit profile (wth)
+
+	/// In-memory `~/.aws/config` with two profiles that differ in keys and region.
+	#[allow(deprecated)]
+	fn two_profiles() -> aws_config::profile::profile_file::ProfileFiles {
+		use aws_config::profile::profile_file::{ProfileFileKind, ProfileFiles};
+
+		ProfileFiles::builder()
+			.with_contents(
+				ProfileFileKind::Config,
+				"[profile work]\n\
+				 aws_access_key_id = AKIAWORK\n\
+				 aws_secret_access_key = work-secret\n\
+				 region = eu-west-1\n\
+				 \n\
+				 [profile personal]\n\
+				 aws_access_key_id = AKIAPERSONAL\n\
+				 aws_secret_access_key = personal-secret\n\
+				 region = us-west-2\n",
+			)
+			.build()
+	}
+
+	/// An explicit profile signs with that profile's keys whatever `AWS_ACCESS_KEY_ID` says: the
+	/// provider reads the profile files alone, where the default chain would prefer the env keys.
+	#[tokio::test]
+	async fn explicit_profile_credentials_come_from_the_profile_files() {
+		let files = two_profiles();
+
+		for (profile, key) in [("work", "AKIAWORK"), ("personal", "AKIAPERSONAL")] {
+			let creds = profile_credentials(profile, "us-east-1")
+				.profile_files(files.clone())
+				.build()
+				.provide_credentials()
+				.await
+				.expect("static profile credentials");
+			assert_eq!(creds.access_key_id(), key, "profile {profile}");
+		}
+	}
+
+	/// Each explicit profile resolves its own `region` through the SDK's profile-aware chain.
+	#[tokio::test]
+	async fn explicit_profile_region_comes_from_that_profile() {
+		if region_from_env().is_some() {
+			// `AWS_REGION` legitimately outranks the profile's region, as with the AWS CLI.
+			return;
+		}
+		let files = two_profiles();
+
+		for (profile, region) in [("work", "eu-west-1"), ("personal", "us-west-2")] {
+			let config = config_loader(Some(profile)).profile_files(files.clone()).load().await;
+			assert_eq!(config.region().map(|r| r.as_ref()), Some(region), "profile {profile}");
+		}
+	}
+
+	// endregion: --- Explicit profile (wth)
 
 	// region:    --- Cache behavior
 
