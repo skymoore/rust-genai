@@ -78,6 +78,7 @@ impl From<IxUsage> for Usage {
 			completion_tokens,
 			completion_tokens_details,
 			total_tokens,
+			cost: None,
 		}
 	}
 }

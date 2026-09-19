@@ -615,6 +615,7 @@ impl GeminiAdapter {
 			completion_tokens_details,
 
 			total_tokens,
+			cost: None,
 		}
 	}
 

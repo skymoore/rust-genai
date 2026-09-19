@@ -213,6 +213,7 @@ pub fn to_embed_response(
 		total_tokens: None,
 		prompt_tokens_details: None,
 		completion_tokens_details: None,
+		cost: None,
 	};
 
 	// Create provider model identifier

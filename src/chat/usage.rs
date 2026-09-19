@@ -12,7 +12,7 @@ use serde_with::{serde_as, skip_serializing_none};
 ///   `completion_tokens_details.reasoning_tokens = thoughts_token_count`.
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
 	/// Total input tokens (formerly `input_tokens`).
 	pub prompt_tokens: Option<i32>,
@@ -25,6 +25,47 @@ pub struct Usage {
 	/// Total tokens as reported by the API, or computed as prompt + completion
 	/// (including cache read/creation tokens when applicable).
 	pub total_tokens: Option<i32>,
+
+	/// Monetary cost of the call when the provider reports it (e.g. OpenRouter's top-level `usage.cost`, USD).
+	/// Deserializes from either a raw number (provider-reported USD) or the structured `UsageCost` object.
+	#[serde(default, deserialize_with = "deserialize_cost")]
+	pub cost: Option<UsageCost>,
+}
+
+/// Monetary cost attached to a `Usage`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageCost {
+	pub amount: f64,
+	/// ISO-4217 code.
+	pub currency: String,
+	pub source: UsageCostSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageCostSource {
+	ProviderReported,
+	AdapterEstimated,
+}
+
+fn deserialize_cost<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<UsageCost>, D::Error> {
+	#[derive(Deserialize)]
+	#[serde(untagged)]
+	enum Raw {
+		Amount(f64),
+		Cost(UsageCost),
+		Other(serde::de::IgnoredAny),
+	}
+
+	Ok(match Option::<Raw>::deserialize(deserializer)? {
+		Some(Raw::Amount(amount)) if amount.is_finite() && amount >= 0.0 => Some(UsageCost {
+			amount,
+			currency: "USD".to_string(),
+			source: UsageCostSource::ProviderReported,
+		}),
+		Some(Raw::Cost(cost)) => Some(cost),
+		_ => None,
+	})
 }
 
 impl Usage {
