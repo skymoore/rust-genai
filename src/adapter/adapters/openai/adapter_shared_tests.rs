@@ -117,6 +117,32 @@ fn test_null_usage_is_treated_as_absent_usage() -> Result<()> {
 	Ok(())
 }
 
+#[test]
+fn test_into_usage_preserves_provider_reported_cost() -> Result<()> {
+	// OpenRouter shape, routed as plain OpenAI (gateway): cost keyed on field presence, not adapter kind.
+	let usage = OpenAIAdapter::into_usage(
+		AdapterKind::OpenAI,
+		json!({"prompt_tokens": 194, "completion_tokens": 2, "total_tokens": 196, "cost": 0.95, "cost_details": {"upstream_inference_cost": 19}}),
+	);
+	let cost = usage.cost.as_ref().ok_or("cost missing")?;
+	assert_eq!(cost.amount, 0.95);
+	assert_eq!(cost.currency, "USD");
+	assert_eq!(cost.source, crate::chat::UsageCostSource::ProviderReported);
+	assert_eq!(usage.prompt_tokens, Some(194));
+
+	let round_trip: crate::chat::Usage = serde_json::from_value(serde_json::to_value(&usage)?)?;
+	assert_eq!(round_trip, usage);
+
+	let usage = OpenAIAdapter::into_usage(AdapterKind::OpenAI, json!({"prompt_tokens": 10, "completion_tokens": 5}));
+	assert!(usage.cost.is_none());
+	// Negative/non-finite cost is dropped without breaking token parsing.
+	let usage = OpenAIAdapter::into_usage(AdapterKind::OpenAI, json!({"prompt_tokens": 10, "cost": -1.0}));
+	assert!(usage.cost.is_none());
+	assert_eq!(usage.prompt_tokens, Some(10));
+
+	Ok(())
+}
+
 /// When an assistant message carries reasoning_content, it must appear
 /// in the serialized JSON so providers that require it (Kimi, DeepSeek)
 /// don't reject the request.

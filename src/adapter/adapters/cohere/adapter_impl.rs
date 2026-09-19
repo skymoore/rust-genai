@@ -239,6 +239,7 @@ impl CohereAdapter {
 			completion_tokens_details: None,
 
 			total_tokens,
+			cost: None,
 		}
 	}
 

@@ -113,6 +113,7 @@ impl AnthropicAdapter {
 			}),
 
 			total_tokens: Some(total_tokens),
+			cost: None,
 		}
 	}
 

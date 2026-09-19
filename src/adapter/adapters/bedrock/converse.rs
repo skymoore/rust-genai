@@ -247,6 +247,7 @@ pub(super) fn parse_usage(mut usage_value: Value) -> Usage {
 		completion_tokens: Some(output_tokens),
 		completion_tokens_details: None,
 		total_tokens: Some(total_tokens),
+		cost: None,
 	}
 }
 
