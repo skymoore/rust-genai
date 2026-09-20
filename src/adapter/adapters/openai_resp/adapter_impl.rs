@@ -264,7 +264,10 @@ impl Adapter for OpenAIRespAdapter {
 			payload.x_insert("stop", chat_options.stop_sequences())?;
 		}
 
-		if let Some(max_tokens) = chat_options.max_tokens() {
+		// GPT-5.6+ rejects `max_output_tokens` ("unsupported parameter"); same version gate as caching.
+		if !requires_explicit_cache(model_name)
+			&& let Some(max_tokens) = chat_options.max_tokens()
+		{
 			payload.x_insert("max_output_tokens", max_tokens)?;
 		}
 		if let Some(top_p) = chat_options.top_p() {
