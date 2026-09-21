@@ -175,10 +175,13 @@ pub(super) fn normalize_stop_reason(converse_reason: &str) -> &str {
 	converse_reason
 }
 
-fn parse_usage(mut usage_value: Value) -> Usage {
+/// Converse `usage` → `Usage`. `inputTokens` excludes cache reads/writes; like the Anthropic
+/// adapter, `prompt_tokens` is the whole prompt (uncached + cache read + cache write) and the
+/// split lives in `prompt_tokens_details`. Shared by the non-stream response and the stream's
+/// `metadata` event.
+pub(super) fn parse_usage(mut usage_value: Value) -> Usage {
 	let input_tokens: i32 = usage_value.x_take("inputTokens").ok().unwrap_or(0);
 	let output_tokens: i32 = usage_value.x_take("outputTokens").ok().unwrap_or(0);
-	let total_tokens: i32 = usage_value.x_take("totalTokens").ok().unwrap_or(input_tokens + output_tokens);
 
 	// Bedrock reports cache stats under cacheReadInputTokens / cacheWriteInputTokens when supported.
 	let cache_read: Option<i32> = usage_value.x_take("cacheReadInputTokens").ok();
@@ -195,12 +198,13 @@ fn parse_usage(mut usage_value: Value) -> Usage {
 		None
 	};
 
+	let prompt_tokens = input_tokens + cache_read.unwrap_or(0) + cache_write.unwrap_or(0);
 	Usage {
-		prompt_tokens: Some(input_tokens),
+		prompt_tokens: Some(prompt_tokens),
 		prompt_tokens_details,
 		completion_tokens: Some(output_tokens),
 		completion_tokens_details: None,
-		total_tokens: Some(total_tokens),
+		total_tokens: Some(prompt_tokens + output_tokens),
 		cost: None,
 	}
 }

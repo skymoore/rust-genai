@@ -17,7 +17,7 @@
 
 use crate::adapter::adapters::support::{StreamerCapturedData, StreamerOptions, new_frame_tap};
 use crate::adapter::inter_stream::{InterStreamEnd, InterStreamEvent};
-use crate::chat::{ChatOptionsSet, StopReason, ToolCall, Usage};
+use crate::chat::{ChatOptionsSet, StopReason, ToolCall};
 use crate::webc::FrameTap;
 use crate::{Error, ModelIden, Result};
 use bytes::{Buf, BytesMut};
@@ -301,7 +301,7 @@ impl BedrockStreamer {
 				if self.options.capture_usage
 					&& let Ok(usage_value) = payload.x_take::<Value>("usage")
 				{
-					self.captured_data.usage = Some(parse_stream_usage(usage_value));
+					self.captured_data.usage = Some(super::converse::parse_usage(usage_value));
 				}
 			}
 			other => {
@@ -348,11 +348,12 @@ impl Stream for BedrockStreamer {
 			// Try to parse a complete frame from the buffer first.
 			match self.try_parse_frame() {
 				Ok(Some(frame)) => {
-					// Detect terminal events BEFORE handling so we can emit End after.
-					let is_message_stop = frame.headers.get(":event-type").map(|s| s.as_str()) == Some("messageStop");
+					// ConverseStream ends `messageStop` → `metadata` (usage, metrics): finalize after
+					// `metadata`, or at EOF below if a stream never sends one.
+					let is_metadata = frame.headers.get(":event-type").map(|s| s.as_str()) == Some("metadata");
 					let events = self.handle_frame(frame)?;
 					self.pending_events.extend(events);
-					if is_message_stop {
+					if is_metadata {
 						self.done = true;
 						let end = self.finalize_end();
 						self.pending_events.push_back(end);
@@ -484,20 +485,6 @@ fn parse_headers(mut raw: &[u8]) -> std::result::Result<std::collections::HashMa
 		}
 	}
 	Ok(out)
-}
-
-fn parse_stream_usage(mut value: Value) -> Usage {
-	let input_tokens: i32 = value.x_take("inputTokens").ok().unwrap_or(0);
-	let output_tokens: i32 = value.x_take("outputTokens").ok().unwrap_or(0);
-	let total_tokens: i32 = value.x_take("totalTokens").ok().unwrap_or(input_tokens + output_tokens);
-	Usage {
-		prompt_tokens: Some(input_tokens),
-		prompt_tokens_details: None,
-		completion_tokens: Some(output_tokens),
-		completion_tokens_details: None,
-		total_tokens: Some(total_tokens),
-		cost: None,
-	}
 }
 
 #[cfg(test)]
@@ -645,6 +632,41 @@ mod tests {
 		));
 		assert!(matches!(events.get(2), Some(Ok(InterStreamEvent::End(_)))));
 		assert_eq!(events.len(), 3);
+		Ok(())
+	}
+
+	/// ConverseStream sends `messageStop` and then `metadata` with the usage; ending
+	/// on `messageStop` used to drop every token count.
+	#[tokio::test]
+	async fn captures_usage_from_metadata_after_message_stop() -> Result<()> {
+		// -- Setup & Fixtures
+		let mut bytes = build_frame("contentBlockDelta", br#"{"delta":{"text":"hi"},"contentBlockIndex":0}"#);
+		bytes.extend(build_frame("messageStop", br#"{"stopReason":"end_turn"}"#));
+		bytes.extend(build_frame(
+			"metadata",
+			br#"{"usage":{"inputTokens":10,"outputTokens":3,"totalTokens":13,"cacheReadInputTokens":100,"cacheWriteInputTokens":5},"metrics":{"latencyMs":1}}"#,
+		));
+		let inner: Pin<Box<dyn Stream<Item = _> + Send>> =
+			Box::pin(futures::stream::iter(vec![Ok(bytes::Bytes::from(bytes))]));
+		let options = crate::chat::ChatOptions::default().with_capture_usage(true);
+		let options_set = ChatOptionsSet::default().with_chat_options(Some(&options));
+
+		// -- Exec
+		let events = BedrockStreamer::new(inner, test_model_iden(), options_set)
+			.collect::<Vec<_>>()
+			.await;
+
+		// -- Check
+		let Some(Ok(InterStreamEvent::End(end))) = events.last() else {
+			return Err("last event should be End".into());
+		};
+		let usage = end.captured_usage.as_ref().ok_or("usage captured")?;
+		assert_eq!(usage.prompt_tokens, Some(115));
+		assert_eq!(usage.completion_tokens, Some(3));
+		let details = usage.prompt_tokens_details.as_ref().ok_or("details")?;
+		assert_eq!(details.cached_tokens, Some(100));
+		assert_eq!(details.cache_creation_tokens, Some(5));
+		assert!(matches!(&end.captured_stop_reason, Some(StopReason::Completed(r)) if r == "end_turn"));
 		Ok(())
 	}
 }
