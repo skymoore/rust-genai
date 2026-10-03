@@ -1,7 +1,7 @@
 use super::RespResponse;
 use crate::adapter::adapters::support::{StreamerCapturedData, StreamerOptions, new_frame_tap};
 use crate::adapter::inter_stream::{InterStreamEnd, InterStreamEvent};
-use crate::chat::{ChatOptionsSet, StopReason, ToolCall, UsageCost};
+use crate::chat::{ChatOptionsSet, StopReason, ThoughtSignature, ToolCall, UsageCost};
 use crate::webc::{Event, EventSourceStream};
 use crate::{Error, ModelIden, Result};
 use serde::Deserialize;
@@ -215,10 +215,11 @@ impl futures::Stream for OpenAIRespStreamer {
 								&& let Ok(encrypted) = item.x_get_str("encrypted_content")
 								&& !encrypted.is_empty()
 							{
+								let origin = self.options.thought_origin.clone();
 								self.captured_data
 									.thought_signatures
 									.get_or_insert_with(Vec::new)
-									.push(encrypted.to_string());
+									.push(ThoughtSignature::new(encrypted).with_origin(origin));
 							}
 							if item.x_get_str("type").ok() == Some("custom_tool_call") {
 								let call_id = item.x_get_str("call_id").unwrap_or_default().to_string();
@@ -359,12 +360,15 @@ impl futures::Stream for OpenAIRespStreamer {
 							// backends that do, this picks up anything missed.
 							if self.options.capture_reasoning_content && self.captured_data.thought_signatures.is_none()
 							{
-								let mut thought_sigs: Vec<String> = Vec::new();
+								let mut thought_sigs: Vec<ThoughtSignature> = Vec::new();
 								for item in &response.output {
 									if item.x_get_str("type").ok() == Some("reasoning")
 										&& let Ok(encrypted) = item.x_get_str("encrypted_content")
 									{
-										thought_sigs.push(encrypted.to_string());
+										thought_sigs.push(
+											ThoughtSignature::new(encrypted)
+												.with_origin(self.options.thought_origin.clone()),
+										);
 									}
 								}
 								if !thought_sigs.is_empty() {
@@ -497,7 +501,7 @@ mod tests {
 	use super::*;
 	use crate::adapter::AdapterKind;
 	use crate::adapter::adapters::support::test_support::{capture_all, chunks_text, collect, options_set, sse_stream};
-	use crate::chat::UsageCostSource;
+	use crate::chat::{ChatOptions, StreamEnd, UsageCostSource};
 
 	#[tokio::test]
 	async fn test_zen_responses_stream_cost_ping_after_completed_lands_in_usage() {
@@ -537,6 +541,43 @@ mod tests {
 			.filter(|event| matches!(event, Ok(InterStreamEvent::End(_))))
 			.count();
 		assert_eq!(ends, 1);
+	}
+
+	/// An `encrypted_content` blob finalised by `output_item.done` lands in
+	/// `StreamEnd.captured_content` tagged with this adapter kind and the request's connection.
+	#[tokio::test]
+	async fn captured_encrypted_content_carries_origin_and_connection() {
+		let body = concat!(
+			"event: response.created\n",
+			"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\",\"model\":\"gpt\",\"output\":[]}}\n\n",
+			"event: response.output_item.done\n",
+			"data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"encrypted_content\":\"gAAAA-blob\",\"summary\":[]}}\n\n",
+			"event: response.output_text.delta\n",
+			"data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"content_index\":0,\"delta\":\"Hi\"}\n\n",
+			"event: response.completed\n",
+			"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"model\":\"gpt\",\"output\":[]}}\n\n",
+		);
+		let options: ChatOptions = capture_all().with_thought_connection("zen");
+		let model = ModelIden::new(AdapterKind::OpenAIResp, "gpt-5");
+		let mut events = collect(OpenAIRespStreamer::new(
+			sse_stream(body).await,
+			model,
+			options_set(&options),
+		))
+		.await;
+		let Some(Ok(InterStreamEvent::End(end))) = events.pop() else {
+			panic!("End must be last: {events:?}");
+		};
+		let content = StreamEnd::from(end).captured_content.expect("captured content");
+		let sig = content.thought_signature_parts()[0];
+		assert_eq!(sig.signature, "gAAAA-blob");
+		let origin = sig.origin.as_ref().expect("origin");
+		assert_eq!(origin.adapter_kind, AdapterKind::OpenAIResp);
+		assert_eq!(origin.model_name, crate::ModelName::from("gpt-5"));
+		assert_eq!(origin.connection.as_deref(), Some("zen"));
+		assert!(sig.readable_by(AdapterKind::OpenAIResp, Some("zen")));
+		assert!(!sig.readable_by(AdapterKind::Anthropic, Some("zen")));
+		assert_eq!(content.first_text(), Some("Hi"));
 	}
 
 	#[test]

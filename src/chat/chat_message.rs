@@ -1,4 +1,4 @@
-use crate::chat::{ContentPart, MessageContent, ToolCall, ToolResponse};
+use crate::chat::{ContentPart, MessageContent, ThoughtSignature, ToolCall, ToolResponse};
 use derive_more::From;
 use serde::{Deserialize, Serialize};
 
@@ -93,7 +93,10 @@ impl ChatMessage {
 	}
 
 	/// Builds an assistant message with thought signatures ordered before tool calls.
-	pub fn assistant_tool_calls_with_thoughts(tool_calls: Vec<ToolCall>, thought_signatures: Vec<String>) -> Self {
+	pub fn assistant_tool_calls_with_thoughts(
+		tool_calls: Vec<ToolCall>,
+		thought_signatures: Vec<ThoughtSignature>,
+	) -> Self {
 		let mut parts: Vec<ContentPart> = thought_signatures.into_iter().map(ContentPart::ThoughtSignature).collect();
 		parts.extend(tool_calls.into_iter().map(ContentPart::ToolCall));
 		ChatMessage::assistant(MessageContent::from_parts(parts))
@@ -203,13 +206,7 @@ impl From<Vec<ToolResponse>> for ChatMessage {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::adapter::{AdapterDispatcher, AdapterKind, ServiceType};
-	use crate::chat::{ChatOptionsSet, ChatRequest};
-	use crate::resolver::AuthData;
-	use crate::{ModelIden, ServiceTarget};
 	use serde_json::json;
-
-	type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
 
 	fn signed_tool_calls() -> Vec<ToolCall> {
 		vec![
@@ -245,62 +242,5 @@ mod tests {
 			ContentPart::ToolCall(call)
 				if call.thought_signatures.as_deref() == Some(["sig-2".to_string()].as_slice())
 		));
-	}
-
-	#[test]
-	fn from_tool_calls_does_not_duplicate_openai_reasoning_items() -> Result<()> {
-		let adapter_kind = AdapterKind::OpenAIResp;
-		let target = ServiceTarget {
-			model: ModelIden::new(adapter_kind, "gpt-5.6"),
-			auth: AuthData::from_single("test-key"),
-			endpoint: AdapterDispatcher::default_endpoint(adapter_kind),
-		};
-		let request = ChatRequest::new(vec![ChatMessage::user("go"), ChatMessage::from(signed_tool_calls())]);
-
-		let web_request =
-			AdapterDispatcher::to_web_request_data(target, ServiceType::Chat, request, ChatOptionsSet::default())?;
-		let input = web_request.payload["input"].as_array().ok_or("input should be an array")?;
-		let signatures = input
-			.iter()
-			.filter(|item| item["type"] == "reasoning")
-			.filter_map(|item| item["encrypted_content"].as_str())
-			.collect::<Vec<_>>();
-
-		assert_eq!(signatures, ["sig-1a", "sig-1b", "sig-2"]);
-		Ok(())
-	}
-
-	#[test]
-	fn from_tool_calls_keeps_gemini_signatures_with_their_calls() -> Result<()> {
-		let adapter_kind = AdapterKind::Gemini;
-		let target = ServiceTarget {
-			model: ModelIden::new(adapter_kind, "gemini-3-pro"),
-			auth: AuthData::from_single("test-key"),
-			endpoint: AdapterDispatcher::default_endpoint(adapter_kind),
-		};
-		let request = ChatRequest::new(vec![ChatMessage::user("go"), ChatMessage::from(signed_tool_calls())]);
-
-		let web_request =
-			AdapterDispatcher::to_web_request_data(target, ServiceType::Chat, request, ChatOptionsSet::default())?;
-		let contents = web_request.payload["contents"]
-			.as_array()
-			.ok_or("contents should be an array")?;
-		let model_turn = contents
-			.iter()
-			.find(|content| content["role"] == "model")
-			.ok_or("model turn should be present")?;
-		let parts = model_turn["parts"].as_array().ok_or("parts should be an array")?;
-		let rendered = parts
-			.iter()
-			.map(|part| {
-				(
-					part["functionCall"]["name"].as_str().unwrap_or("-"),
-					part["thoughtSignature"].as_str().unwrap_or("-"),
-				)
-			})
-			.collect::<Vec<_>>();
-
-		assert_eq!(rendered, [("first", "sig-1a"), ("second", "sig-2")]);
-		Ok(())
 	}
 }

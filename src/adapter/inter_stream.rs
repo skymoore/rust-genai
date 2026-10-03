@@ -5,7 +5,7 @@
 //!
 //! NOTE: This might be removed at some point as it may not be needed, and we could go directly to the GenAI stream.
 
-use crate::chat::{StopReason, Usage};
+use crate::chat::{StopReason, ThoughtSignature, Usage};
 
 /// One provider reasoning block with its opaque continuation signature.
 ///
@@ -14,7 +14,7 @@ use crate::chat::{StopReason, Usage};
 #[derive(Debug)]
 pub struct InterStreamThoughtBlock {
 	pub reasoning_content: Option<String>,
-	pub signature: String,
+	pub signature: ThoughtSignature,
 }
 
 #[derive(Debug, Default)]
@@ -34,8 +34,9 @@ pub struct InterStreamEnd {
 	// When `ChatOptions..capture_tool_calls == true`
 	pub captured_tool_calls: Option<Vec<crate::chat::ToolCall>>,
 
-	// Provider continuation metadata captured whenever the provider emits it.
-	pub captured_thought_signatures: Option<Vec<String>>,
+	// Provider continuation metadata captured whenever the provider emits it, tagged with
+	// the issuing `ThoughtOrigin` by the streamer (see `StreamerOptions::thought_origin`).
+	pub captured_thought_signatures: Option<Vec<ThoughtSignature>>,
 
 	// Paired provider reasoning/signature blocks in original block order.
 	pub captured_thought_blocks: Option<Vec<InterStreamThoughtBlock>>,

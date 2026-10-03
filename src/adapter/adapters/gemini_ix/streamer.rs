@@ -220,10 +220,9 @@ impl futures::Stream for GeminiIxStreamer {
 								if signature.is_empty() {
 									continue;
 								}
-								self.captured_data
-									.thought_signatures
-									.get_or_insert_with(Vec::new)
-									.push(signature.clone());
+								let tagged = crate::chat::ThoughtSignature::new(signature.clone())
+									.with_origin(self.options.thought_origin.clone());
+								self.captured_data.thought_signatures.get_or_insert_with(Vec::new).push(tagged);
 								return Poll::Ready(Some(Ok(InterStreamEvent::ThoughtSignatureChunk(signature))));
 							}
 
@@ -259,8 +258,12 @@ impl futures::Stream for GeminiIxStreamer {
 
 							if self.options.capture_tool_calls {
 								let is_first = self.captured_data.tool_calls.as_ref().is_none_or(Vec::is_empty);
-								let signatures =
-									self.captured_data.thought_signatures.clone().filter(|s| !s.is_empty());
+								let signatures = self
+									.captured_data
+									.thought_signatures
+									.as_ref()
+									.filter(|s| !s.is_empty())
+									.map(|s| s.iter().map(|sig| sig.signature.clone()).collect::<Vec<_>>());
 								if is_first && let Some(signatures) = signatures {
 									tool_call.thought_signatures = Some(signatures);
 								}

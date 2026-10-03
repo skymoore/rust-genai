@@ -7,8 +7,8 @@ use crate::adapter::{Adapter, AdapterKind, ServiceType, WebRequestData};
 use crate::chat::{
 	Binary, BinarySource, CacheControl, CacheCreationDetails, ChatOptionsSet, ChatRequest, ChatResponse,
 	ChatResponseFormat, ChatRole, CompletionTokensDetails, ContentPart, JsonSchemaDialect, MessageContent,
-	PromptTokensDetails, ReasoningEffort, StopReason, Tool, ToolCall, ToolChoice, ToolConfig, ToolName, ToolResponse,
-	Usage, UsageCost, sanitize_json_schema,
+	PromptTokensDetails, ReasoningEffort, StopReason, ThoughtOrigin, ThoughtSignature, Tool, ToolCall, ToolChoice,
+	ToolConfig, ToolName, ToolResponse, Usage, UsageCost, sanitize_json_schema,
 };
 use crate::resolver::{AuthData, Endpoint};
 use crate::webc::{WebClient, WebResponse};
@@ -124,10 +124,19 @@ impl AnthropicAdapter {
 
 	/// Takes the GenAI ChatMessages and constructs the System string and JSON Messages for Anthropic.
 	/// - Will push the `ChatRequest.system` and system message to `AnthropicRequestParts.system`
+	/// - `model_iden.adapter_kind` + `options_set.thought_connection()` decide which thought
+	///   signatures (and `Custom` parts) are this adapter's own and may be replayed.
 	pub(in crate::adapter::adapters) fn into_anthropic_request_parts(
 		mut chat_req: ChatRequest,
-		request_cache_control: Option<CacheControl>,
+		model_iden: &ModelIden,
+		options_set: &ChatOptionsSet<'_, '_>,
 	) -> Result<AnthropicRequestParts> {
+		let request_cache_control = options_set.cache_control().cloned();
+		let adapter_kind = model_iden.adapter_kind;
+		let thought_connection = options_set.thought_connection();
+		// Custom parts are forwarded verbatim only when this adapter kind produced them
+		// (or the caller built them untagged).
+		let is_own_custom = |custom: &crate::chat::CustomPart| custom.adapter_kind().is_none_or(|k| k == adapter_kind);
 		let mut messages: Vec<Value> = Vec::new();
 		// (content, cache_control)
 		let mut systems: Vec<(String, Option<CacheControl>)> = Vec::new();
@@ -248,7 +257,10 @@ impl AnthropicAdapter {
 								}
 								ContentPart::ThoughtSignature(_) => {}
 								ContentPart::ReasoningContent(_) => {}
-								ContentPart::Custom(custom_part) => values.push(custom_part.data),
+								ContentPart::Custom(custom_part) if is_own_custom(&custom_part) => {
+									values.push(custom_part.data)
+								}
+								ContentPart::Custom(_) => {}
 							}
 						}
 						let values = apply_cache_control_to_parts(cache_control.as_ref(), values);
@@ -261,53 +273,67 @@ impl AnthropicAdapter {
 					let mut values: Vec<Value> = Vec::new();
 					let mut has_tool_use = false;
 					let mut has_text = false;
-					let mut thought_signatures: Vec<String> = Vec::new();
-					let mut reasoning_contents: Vec<String> = Vec::new();
 					let mut other_parts: Vec<ContentPart> = Vec::new();
+
+					// Positional pairing: a `ThoughtSignature` signs the `ReasoningContent` that follows
+					// it (the order the response path and `From<InterStreamEnd>` write). Only a signature
+					// this adapter kind issued over this connection is replayable; any other — another
+					// provider, another account, or an untagged legacy one — is dropped together with the
+					// reasoning it signs, since Anthropic 400s on a signature it cannot verify and an
+					// unsigned thinking block does not exist.
+					enum Pending {
+						None,
+						Readable(String),
+						Dropped,
+					}
+					let mut pending = Pending::None;
+					let mut dropped_foreign = 0usize;
+					let mut unpaired = 0usize;
 
 					for part in msg.content {
 						match part {
-							ContentPart::ThoughtSignature(signature) => thought_signatures.push(signature),
-							ContentPart::ReasoningContent(reasoning) => reasoning_contents.push(reasoning),
+							ContentPart::ThoughtSignature(sig) => {
+								if matches!(pending, Pending::Readable(_)) {
+									unpaired += 1;
+								}
+								pending = if sig.readable_by(adapter_kind, thought_connection) {
+									Pending::Readable(sig.signature)
+								} else {
+									dropped_foreign += 1;
+									Pending::Dropped
+								};
+							}
+							ContentPart::ReasoningContent(thinking) => {
+								match std::mem::replace(&mut pending, Pending::None) {
+									// Anthropic requires every signed thinking block before text/tool-use blocks.
+									Pending::Readable(signature) => values.push(json!({
+										"type": "thinking",
+										"thinking": thinking,
+										"signature": signature,
+									})),
+									Pending::Dropped => {}
+									Pending::None => unpaired += 1,
+								}
+							}
 							other => other_parts.push(other),
 						}
 					}
-
-					// `ToolCall.thought_signatures` is a convenience mirror. Use it only when
-					// canonical message content does not already carry signatures.
-					if thought_signatures.is_empty()
-						&& let Some(mirrored) = other_parts.iter().find_map(|part| match part {
-							ContentPart::ToolCall(tool_call) => tool_call.thought_signatures.clone(),
-							_ => None,
-						}) {
-						thought_signatures = mirrored;
+					if matches!(pending, Pending::Readable(_)) {
+						unpaired += 1;
 					}
 
-					// Anthropic only accepts a thinking block when it carries both its reasoning
-					// text and the matching signature, so the two lists must line up one-to-one.
-					//
-					// They can legitimately fail to line up: a conversation carried over from a
-					// provider that returns unsigned reasoning (OpenAI, DeepSeek, ...), or an
-					// assistant message built by hand with `.with_reasoning_content(..)`. Pairing
-					// by position anyway would sign the wrong text, which Anthropic rejects, so
-					// drop the thinking blocks and send the rest of the message instead.
-					if reasoning_contents.len() == thought_signatures.len() {
-						// Anthropic requires every signed thinking block before text/tool-use blocks.
-						values.extend(reasoning_contents.into_iter().zip(thought_signatures).map(
-							|(thinking, signature)| {
-								json!({
-									"type": "thinking",
-									"thinking": thinking,
-									"signature": signature,
-								})
-							},
-						));
-					} else if !reasoning_contents.is_empty() || !thought_signatures.is_empty() {
+					if dropped_foreign > 0 {
+						tracing::debug!(
+							dropped = dropped_foreign,
+							"anthropic - dropped thought signatures (and their reasoning) issued by another \
+							 provider or connection; not replayable here"
+						);
+					}
+					if unpaired > 0 {
 						tracing::warn!(
-							reasoning_count = reasoning_contents.len(),
-							signature_count = thought_signatures.len(),
-							"anthropic - assistant message has unpaired reasoning content and thought signatures; \
-							 omitting thinking blocks from this message"
+							unpaired,
+							"anthropic - assistant message has unpaired reasoning content or thought signatures; \
+							 omitting those thinking blocks from this message"
 						);
 					}
 
@@ -339,7 +365,10 @@ impl AnthropicAdapter {
 							ContentPart::Binary(_) => {}
 							ContentPart::ToolResponse(_) => {}
 							ContentPart::ThoughtSignature(_) | ContentPart::ReasoningContent(_) => unreachable!(),
-							ContentPart::Custom(custom_part) => values.push(custom_part.data),
+							ContentPart::Custom(custom_part) if is_own_custom(&custom_part) => {
+								values.push(custom_part.data)
+							}
+							ContentPart::Custom(_) => {}
 						}
 					}
 
@@ -367,7 +396,9 @@ impl AnthropicAdapter {
 							ContentPart::ToolResponse(tool_response) => {
 								values.push(tool_result_to_json(tool_response));
 							}
-							ContentPart::Custom(custom_part) => values.push(custom_part.data),
+							ContentPart::Custom(custom_part) if is_own_custom(&custom_part) => {
+								values.push(custom_part.data)
+							}
 							_ => {}
 						}
 					}
@@ -477,7 +508,7 @@ impl AnthropicAdapter {
 			system,
 			messages,
 			tools,
-		} = Self::into_anthropic_request_parts(chat_req, options_set.cache_control().cloned())?;
+		} = Self::into_anthropic_request_parts(chat_req, &model, &options_set)?;
 
 		// -- Extract Model Name and Reasoning
 		let (_, raw_model_name) = model.model_name.namespace_and_name();
@@ -578,7 +609,9 @@ impl AnthropicAdapter {
 	pub(in crate::adapter::adapters) fn build_chat_response(
 		model_iden: ModelIden,
 		web_response: WebResponse,
+		thought_connection: Option<&str>,
 	) -> Result<ChatResponse> {
+		let thought_origin = ThoughtOrigin::new(&model_iden, thought_connection);
 		let WebResponse { mut body, .. } = web_response;
 
 		// -- Capture the provider_model_iden
@@ -622,7 +655,9 @@ impl AnthropicAdapter {
 					let signature: String = item.x_take("signature")?;
 					reasoning_content.push(reasoning.clone());
 					thought_signatures.push(signature.clone());
-					content.push(ContentPart::ThoughtSignature(signature));
+					content.push(ContentPart::ThoughtSignature(
+						ThoughtSignature::new(signature).with_origin(thought_origin.clone()),
+					));
 					content.push(ContentPart::ReasoningContent(reasoning));
 				}
 				"tool_use" => {

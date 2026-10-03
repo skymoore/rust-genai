@@ -56,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let mut chat_stream = client.exec_chat_stream(MODEL, chat_req.clone(), Some(&chat_options)).await?;
 
 	let mut tool_calls: Vec<ToolCall> = [].to_vec();
-	let mut captured_thoughts: Option<Vec<String>> = None;
+	let mut captured_thoughts: Option<Vec<genai::chat::ThoughtSignature>> = None;
 
 	// print_chat_stream(chat_res, Some(&print_options)).await?;
 	println!("--- Streaming response with tool calls");
