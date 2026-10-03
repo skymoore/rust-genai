@@ -320,8 +320,11 @@ impl Adapter for OpenAIRespAdapter {
 		// -- Capture the provider_model_iden
 		let provider_model_iden = model_iden.from_name(&resp.model);
 
-		// -- Capture the usage
-		let usage = resp.usage.map(Usage::from).unwrap_or_default();
+		// -- Capture the usage (a gateway-injected top-level `cost` is the billed amount and wins)
+		let mut usage = resp.usage.map(Usage::from).unwrap_or_default();
+		if resp.cost.is_some() {
+			usage.cost = resp.cost;
+		}
 
 		// -- Capture the content
 		let mut content: MessageContent = MessageContent::default();

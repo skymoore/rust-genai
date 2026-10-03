@@ -625,3 +625,34 @@ fn test_openai_resp_to_chat_response_incomplete_reason_sets_stop_reason() -> Res
 
 	Ok(())
 }
+
+/// OpenCode Zen injects the billed USD amount as a top-level `cost` string on the response body.
+#[test]
+fn test_openai_resp_to_chat_response_lifts_zen_top_level_cost() -> Result<()> {
+	let web_response = WebResponse {
+		status: reqwest::StatusCode::OK,
+		body: json!({
+			"id": "resp_1",
+			"status": "completed",
+			"model": "gpt-5.6",
+			"output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}],
+			"usage": {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15},
+			"cost": "0.00123400"
+		}),
+	};
+
+	let response = OpenAIRespAdapter::to_chat_response(
+		ModelIden::new(AdapterKind::OpenAIResp, "gpt-5.6"),
+		web_response,
+		ChatOptionsSet::default(),
+	)?;
+
+	let cost = response.usage.cost.as_ref().ok_or("cost")?;
+	assert_eq!(cost.amount, 0.001234);
+	assert_eq!(cost.currency, "USD");
+	assert_eq!(cost.source, crate::chat::UsageCostSource::ProviderReported);
+	assert_eq!(response.usage.prompt_tokens, Some(12));
+	assert_eq!(response.first_text(), Some("ok"));
+
+	Ok(())
+}

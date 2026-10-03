@@ -1,4 +1,5 @@
 use super::RespUsage;
+use crate::chat::UsageCost;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_with::skip_serializing_none;
@@ -39,6 +40,10 @@ pub struct RespResponse {
 	pub output: Vec<Value>,
 
 	pub usage: Option<RespUsage>,
+
+	/// OpenCode Zen injects the billed USD cost as a top-level `"cost"` string on the response body.
+	#[serde(default, deserialize_with = "crate::chat::deserialize_cost")]
+	pub cost: Option<UsageCost>,
 }
 
 impl RespResponse {
