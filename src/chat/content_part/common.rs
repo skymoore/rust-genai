@@ -1,4 +1,4 @@
-use crate::chat::{Binary, CustomPart, ToolCall, ToolResponse};
+use crate::chat::{Binary, CustomPart, ThoughtSignature, ToolCall, ToolResponse};
 use crate::{ModelIden, Result};
 use derive_more::From;
 use serde::{Deserialize, Serialize};
@@ -23,8 +23,9 @@ pub enum ContentPart {
 	#[from]
 	ToolResponse(ToolResponse),
 
-	#[from(ignore)]
-	ThoughtSignature(String),
+	/// A provider's reasoning continuation token with its issuer; see [`ThoughtSignature`].
+	#[from]
+	ThoughtSignature(ThoughtSignature),
 
 	/// Reasoning/thinking content from models that support it (e.g., DeepSeek, kimi).
 	/// Adapters extract provider-specific reasoning and normalize it into this variant.
@@ -159,8 +160,13 @@ impl ContentPart {
 		}
 	}
 
-	/// Borrow the thought signature if present.
+	/// Borrow the raw thought signature string if present.
 	pub fn as_thought_signature(&self) -> Option<&str> {
+		self.as_thought_signature_part().map(|part| part.signature.as_str())
+	}
+
+	/// Borrow the thought signature part (string + origin) if present.
+	pub fn as_thought_signature_part(&self) -> Option<&ThoughtSignature> {
 		if let ContentPart::ThoughtSignature(thought_signature) = self {
 			Some(thought_signature)
 		} else {
@@ -168,10 +174,10 @@ impl ContentPart {
 		}
 	}
 
-	/// Extract the thought, consuming the part.
+	/// Extract the raw thought signature string, consuming the part.
 	pub fn into_thought_signature(self) -> Option<String> {
 		if let ContentPart::ThoughtSignature(thought_signature) = self {
-			Some(thought_signature)
+			Some(thought_signature.signature)
 		} else {
 			None
 		}
@@ -228,7 +234,7 @@ impl ContentPart {
 			ContentPart::Binary(binary) => binary.size(),
 			ContentPart::ToolCall(tool_call) => tool_call.size(),
 			ContentPart::ToolResponse(tool_response) => tool_response.size(),
-			ContentPart::ThoughtSignature(thought) => thought.len(),
+			ContentPart::ThoughtSignature(thought) => thought.signature.len(),
 			ContentPart::ReasoningContent(reasoning) => reasoning.len(),
 			ContentPart::Custom(_value) => 0, // TODO: will need to compute this size
 		}

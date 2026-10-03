@@ -5,9 +5,10 @@
 //! `additionalModelRequestFields` via [`BedrockPublisher`].
 
 use crate::adapter::adapters::anthropic::{AnthropicAdapter, AnthropicModel, insert_anthropic_reasoning};
+use crate::adapter::AdapterKind;
 use crate::chat::{
 	Binary, BinarySource, ChatOptionsSet, ChatRequest, ChatResponse, ChatRole, ContentPart, MessageContent,
-	ReasoningEffort, StopReason, Tool, ToolCall, ToolName, Usage,
+	ReasoningEffort, StopReason, ThoughtOrigin, ThoughtSignature, Tool, ToolCall, ToolName, Usage,
 };
 use crate::webc::WebResponse;
 use crate::{Error, ModelIden, Result};
@@ -61,7 +62,7 @@ pub(super) fn build_converse_payload(
 		system,
 		messages,
 		tools,
-	} = into_converse_request_parts(chat_req, publisher)?;
+	} = into_converse_request_parts(chat_req, model_iden, options_set.thought_connection())?;
 
 	let mut payload = json!({});
 
@@ -117,8 +118,14 @@ pub(super) fn build_converse_payload(
 	Ok(payload)
 }
 
-/// Parse a Converse JSON response into a genai `ChatResponse`.
-pub(super) fn parse_converse_response(model_iden: ModelIden, web_response: WebResponse) -> Result<ChatResponse> {
+/// Parse a Converse JSON response into a genai `ChatResponse`. Thought signatures are tagged with
+/// `model_iden.adapter_kind` and `thought_connection`.
+pub(super) fn parse_converse_response(
+	model_iden: ModelIden,
+	web_response: WebResponse,
+	thought_connection: Option<&str>,
+) -> Result<ChatResponse> {
+	let thought_origin = ThoughtOrigin::new(&model_iden, thought_connection);
 	let WebResponse { mut body, .. } = web_response;
 
 	// -- Stop reason
@@ -159,11 +166,15 @@ pub(super) fn parse_converse_response(model_iden: ModelIden, web_response: WebRe
 			// parts so the turn can be replayed (see `assistant_content_to_converse_blocks`).
 			if let Ok(redacted) = reasoning.x_take::<String>("redactedContent") {
 				thought_signatures.push(redacted.clone());
-				content.push(ContentPart::ThoughtSignature(redacted));
+				content.push(ContentPart::ThoughtSignature(
+					ThoughtSignature::new(redacted).with_origin(thought_origin.clone()),
+				));
 			} else if let Ok(text) = reasoning.x_take::<String>("/reasoningText/text") {
 				if let Ok(signature) = reasoning.x_take::<String>("/reasoningText/signature") {
 					thought_signatures.push(signature.clone());
-					content.push(ContentPart::ThoughtSignature(signature));
+					content.push(ContentPart::ThoughtSignature(
+						ThoughtSignature::new(signature).with_origin(thought_origin.clone()),
+					));
 					content.push(ContentPart::ReasoningContent(text.clone()));
 				}
 				reasoning_content.push(text);
@@ -354,7 +365,11 @@ struct ConverseRequestParts {
 }
 
 /// Translate a genai `ChatRequest` into Converse's `{system, messages, toolConfig}` shape.
-fn into_converse_request_parts(chat_req: ChatRequest, publisher: BedrockPublisher) -> Result<ConverseRequestParts> {
+fn into_converse_request_parts(
+	chat_req: ChatRequest,
+	model_iden: &ModelIden,
+	thought_connection: Option<&str>,
+) -> Result<ConverseRequestParts> {
 	let mut messages: Vec<Value> = Vec::new();
 	let mut systems: Vec<String> = Vec::new();
 	// Shared across messages, since contiguous user messages get merged into one.
@@ -376,7 +391,8 @@ fn into_converse_request_parts(chat_req: ChatRequest, publisher: BedrockPublishe
 				push_converse_message(&mut messages, "user", blocks);
 			}
 			ChatRole::Assistant => {
-				let blocks = assistant_content_to_converse_blocks(msg.content, publisher);
+				let blocks =
+					assistant_content_to_converse_blocks(msg.content, model_iden.adapter_kind, thought_connection);
 				push_converse_message(&mut messages, "assistant", blocks);
 			}
 			ChatRole::Tool => {
@@ -455,43 +471,49 @@ fn user_content_to_converse_blocks(content: MessageContent, document_names: &mut
 /// its own reasoning after a tool result. Parts arrive as `StreamEnd::captured_content` /
 /// `parse_converse_response` lay them out: a `ThoughtSignature` immediately followed by its
 /// `ReasoningContent` is a signed `reasoningText` block, and a lone `ThoughtSignature` is a
-/// `redactedContent` blob. Unsigned reasoning text can't be replayed and is dropped. When the
-/// content carries no signatures, the ones mirrored onto the first tool call are used, but only
-/// for OpenAI: the mirror keeps neither the block kind nor the reasoning text, so it can only be
-/// replayed as `redactedContent`, which is what OpenAI's encrypted reasoning is. Other publishers'
-/// signatures (e.g. Claude's `reasoningText` signature, or another provider's) would be rejected.
-fn assistant_content_to_converse_blocks(content: MessageContent, publisher: BedrockPublisher) -> Vec<Value> {
+/// `redactedContent` blob. Unsigned reasoning text can't be replayed and is dropped. Only a
+/// signature `adapter_kind` issued over `thought_connection` is replayed (see
+/// `ThoughtSignature::readable_by`); any other is dropped with the reasoning it signs.
+/// `ToolCall.thought_signatures` is a mirror for callers, never a replay source.
+fn assistant_content_to_converse_blocks(
+	content: MessageContent,
+	adapter_kind: AdapterKind,
+	thought_connection: Option<&str>,
+) -> Vec<Value> {
 	let mut reasoning_blocks: Vec<Value> = Vec::new();
 	let mut other_parts: Vec<ContentPart> = Vec::new();
+	let mut dropped_foreign = 0usize;
 	let mut parts = content.into_iter().peekable();
 	while let Some(part) = parts.next() {
 		match part {
 			ContentPart::ThoughtSignature(signature) => {
-				if let Some(ContentPart::ReasoningContent(_)) = parts.peek()
+				let paired_text = if let Some(ContentPart::ReasoningContent(_)) = parts.peek()
 					&& let Some(ContentPart::ReasoningContent(text)) = parts.next()
 				{
-					reasoning_blocks.push(json!({
-						"reasoningContent": { "reasoningText": { "text": text, "signature": signature } }
-					}));
+					Some(text)
 				} else {
-					reasoning_blocks.push(json!({ "reasoningContent": { "redactedContent": signature } }));
+					None
+				};
+				if !signature.readable_by(adapter_kind, thought_connection) {
+					dropped_foreign += 1;
+					continue;
 				}
+				let signature = signature.signature;
+				reasoning_blocks.push(match paired_text {
+					Some(text) => json!({
+						"reasoningContent": { "reasoningText": { "text": text, "signature": signature } }
+					}),
+					None => json!({ "reasoningContent": { "redactedContent": signature } }),
+				});
 			}
 			ContentPart::ReasoningContent(_) => {}
 			other => other_parts.push(other),
 		}
 	}
-
-	if reasoning_blocks.is_empty()
-		&& matches!(publisher, BedrockPublisher::OpenAI)
-		&& let Some(mirrored) = other_parts.iter().find_map(|part| match part {
-			ContentPart::ToolCall(tool_call) => tool_call.thought_signatures.clone(),
-			_ => None,
-		}) {
-		reasoning_blocks.extend(
-			mirrored
-				.into_iter()
-				.map(|blob| json!({ "reasoningContent": { "redactedContent": blob } })),
+	if dropped_foreign > 0 {
+		tracing::debug!(
+			dropped = dropped_foreign,
+			"bedrock - dropped thought signatures issued by another provider or connection; not replayable here"
 		);
 	}
 

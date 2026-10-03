@@ -1,7 +1,7 @@
 use super::RespResponse;
 use crate::adapter::adapters::support::{StreamerCapturedData, StreamerOptions, new_frame_tap};
 use crate::adapter::inter_stream::{InterStreamEnd, InterStreamEvent};
-use crate::chat::{ChatOptionsSet, StopReason, ToolCall, UsageCost};
+use crate::chat::{ChatOptionsSet, StopReason, ThoughtSignature, ToolCall, UsageCost};
 use crate::webc::{Event, EventSourceStream};
 use crate::{Error, ModelIden, Result};
 use serde::Deserialize;
@@ -261,10 +261,11 @@ impl futures::Stream for OpenAIRespStreamer {
 								&& let Ok(encrypted) = item.x_get_str("encrypted_content")
 								&& !encrypted.is_empty()
 							{
+								let origin = self.options.thought_origin.clone();
 								self.captured_data
 									.thought_signatures
 									.get_or_insert_with(Vec::new)
-									.push(encrypted.to_string());
+									.push(ThoughtSignature::new(encrypted).with_origin(origin));
 							}
 							// For a function_call, the complete arguments live on `done`. `arguments.delta`
 							// may be truncated or arrive before `output_item.added`; a non-empty `arguments` on `done` wins.
@@ -357,12 +358,15 @@ impl futures::Stream for OpenAIRespStreamer {
 							// backends that do, this picks up anything missed.
 							if self.options.capture_reasoning_content && self.captured_data.thought_signatures.is_none()
 							{
-								let mut thought_sigs: Vec<String> = Vec::new();
+								let mut thought_sigs: Vec<ThoughtSignature> = Vec::new();
 								for item in &response.output {
 									if item.x_get_str("type").ok() == Some("reasoning")
 										&& let Ok(encrypted) = item.x_get_str("encrypted_content")
 									{
-										thought_sigs.push(encrypted.to_string());
+										thought_sigs.push(
+											ThoughtSignature::new(encrypted)
+												.with_origin(self.options.thought_origin.clone()),
+										);
 									}
 								}
 								if !thought_sigs.is_empty() {

@@ -1,6 +1,6 @@
 use super::*;
 use crate::adapter::AdapterKind;
-use crate::chat::{ChatMessage, ChatOptions, JsonSpec, Tool, ToolCall, ToolChoice, ToolResponse};
+use crate::chat::{ChatMessage, ChatOptions, JsonSpec, ThoughtSignature, Tool, ToolCall, ToolChoice, ToolResponse};
 
 type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -281,7 +281,7 @@ fn test_openai_resp_assistant_message_uses_output_text_content_type() {
 		.append_message(ChatMessage::assistant("The weather is sunny."));
 
 	// Serialize to OpenAI Responses API format
-	let parts = OpenAIRespAdapter::into_openai_request_parts(&model_iden, chat_req, None)
+	let parts = OpenAIRespAdapter::into_openai_request_parts(&model_iden, chat_req, None, None)
 		.expect("Should serialize successfully");
 
 	// Find the assistant message in input_items
@@ -656,3 +656,80 @@ fn test_openai_resp_to_chat_response_lifts_zen_top_level_cost() -> Result<()> {
 
 	Ok(())
 }
+
+// region:    --- thought-signature provenance
+
+fn reasoning_items(parts: &OpenAIRespRequestParts) -> Vec<&Value> {
+	parts.input_items.iter().filter(|item| item["type"] == "reasoning").collect()
+}
+
+fn tagged(sig: &str, kind: AdapterKind, connection: Option<&str>) -> ContentPart {
+	ContentPart::ThoughtSignature(
+		ThoughtSignature::new(sig).with_origin(ThoughtOrigin::new(&ModelIden::new(kind, "m"), connection)),
+	)
+}
+
+#[test]
+fn test_openai_resp_anthropic_signature_is_not_sent_as_encrypted_content() -> Result<()> {
+	let model_iden = ModelIden::new(AdapterKind::OpenAIResp, "gpt-5");
+	let assistant = ChatMessage::assistant(MessageContent::from_parts(vec![
+		tagged("ant-sig", AdapterKind::Anthropic, None),
+		ContentPart::ReasoningContent("thinking…".to_string()),
+		ContentPart::Text("answer".to_string()),
+	]));
+	let chat_req = ChatRequest::new(vec![ChatMessage::user("q"), assistant]);
+
+	let parts = OpenAIRespAdapter::into_openai_request_parts(&model_iden, chat_req, None, None)?;
+
+	assert!(reasoning_items(&parts).is_empty(), "{:?}", parts.input_items);
+	assert_eq!(parts.input_items[1]["role"], "assistant");
+	assert_eq!(parts.input_items[1]["content"][0]["text"], "answer");
+
+	// Same adapter, other connection; and the untagged legacy string: both dropped.
+	for part in [
+		tagged("sig", AdapterKind::OpenAIResp, Some("zen")),
+		ContentPart::ThoughtSignature(ThoughtSignature::new("legacy")),
+	] {
+		let chat_req = ChatRequest::new(vec![ChatMessage::assistant(MessageContent::from_parts(vec![part]))]);
+		let parts = OpenAIRespAdapter::into_openai_request_parts(&model_iden, chat_req, None, Some("direct"))?;
+		assert!(reasoning_items(&parts).is_empty(), "{:?}", parts.input_items);
+	}
+
+	Ok(())
+}
+
+#[test]
+fn test_openai_resp_same_origin_encrypted_content_round_trips() -> Result<()> {
+	let model_iden = ModelIden::new(AdapterKind::OpenAIResp, "gpt-5");
+	let options = ChatOptions::default().with_thought_connection("direct");
+	let response = OpenAIRespAdapter::to_chat_response(
+		model_iden.clone(),
+		WebResponse {
+			status: reqwest::StatusCode::OK,
+			body: json!({
+				"id": "resp_1",
+				"status": "completed",
+				"model": "gpt-5",
+				"output": [
+					{"type": "reasoning", "id": "rs_1", "encrypted_content": "blob-1", "summary": []},
+					{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}
+				]
+			}),
+		},
+		ChatOptionsSet::default().with_chat_options(Some(&options)),
+	)?;
+	let sig = response.content.thought_signature_parts()[0];
+	assert_eq!(sig.signature, "blob-1");
+	assert!(sig.readable_by(AdapterKind::OpenAIResp, Some("direct")));
+
+	let chat_req = ChatRequest::new(vec![ChatMessage::user("q"), ChatMessage::assistant(response.content)]);
+	let parts = OpenAIRespAdapter::into_openai_request_parts(&model_iden, chat_req, None, Some("direct"))?;
+	assert_eq!(
+		reasoning_items(&parts),
+		vec![&json!({"type": "reasoning", "encrypted_content": "blob-1", "summary": []})]
+	);
+
+	Ok(())
+}
+
+// endregion: --- thought-signature provenance

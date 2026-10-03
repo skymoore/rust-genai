@@ -1,4 +1,4 @@
-use crate::chat::{Binary, ContentPart, ToolCall, ToolResponse};
+use crate::chat::{Binary, ContentPart, ThoughtOrigin, ThoughtSignature, ToolCall, ToolResponse};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -100,7 +100,7 @@ pub enum IxStep {
 }
 
 impl IxStep {
-	pub fn into_content_parts(self, reasoning: &mut String) -> Vec<ContentPart> {
+	pub fn into_content_parts(self, reasoning: &mut String, thought_origin: &ThoughtOrigin) -> Vec<ContentPart> {
 		match self {
 			IxStep::ModelOutput { content } => content.into_iter().filter_map(IxContent::into_content_part).collect(),
 
@@ -111,7 +111,9 @@ impl IxStep {
 					}
 				}
 				match signature {
-					Some(signature) if !signature.is_empty() => vec![ContentPart::ThoughtSignature(signature)],
+					Some(signature) if !signature.is_empty() => vec![ContentPart::ThoughtSignature(
+						ThoughtSignature::new(signature).with_origin(thought_origin.clone()),
+					)],
 					_ => Vec::new(),
 				}
 			}

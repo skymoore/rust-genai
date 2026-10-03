@@ -2,7 +2,7 @@
 //! It should be private to the `crate::adapter::adapters` module.
 
 use crate::ModelIden;
-use crate::chat::{ChatOptionsSet, FrameCtx, Usage};
+use crate::chat::{ChatOptionsSet, FrameCtx, ThoughtOrigin, Usage};
 use crate::resolver::AuthData;
 use crate::webc::FrameTap;
 use crate::{Error, Result};
@@ -36,6 +36,8 @@ pub struct StreamerOptions {
 	pub capture_content: bool,
 	pub capture_tool_calls: bool,
 	pub model_iden: ModelIden,
+	/// Stamped onto every thought signature this stream captures.
+	pub thought_origin: ThoughtOrigin,
 }
 
 impl StreamerOptions {
@@ -45,6 +47,7 @@ impl StreamerOptions {
 			capture_content: options_set.capture_content().unwrap_or(false),
 			capture_reasoning_content: options_set.capture_reasoning_content().unwrap_or(false),
 			capture_tool_calls: options_set.capture_tool_calls().unwrap_or(false),
+			thought_origin: ThoughtOrigin::new(&model_iden, options_set.thought_connection()),
 			model_iden,
 		}
 	}
@@ -61,7 +64,7 @@ pub struct StreamerCapturedData {
 	pub content: Option<String>,
 	pub reasoning_content: Option<String>,
 	pub tool_calls: Option<Vec<crate::chat::ToolCall>>,
-	pub thought_signatures: Option<Vec<String>>,
+	pub thought_signatures: Option<Vec<crate::chat::ThoughtSignature>>,
 }
 
 // endregion: --- Streamer Captured Data
