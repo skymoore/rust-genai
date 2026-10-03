@@ -31,6 +31,8 @@
 - `!` API CHANGE: `JsonSpec::schema_with_additional_properties_false` is removed. Provider adapters now sanitize schemas as required by their target API. `JsonSchemaDialect` and `sanitize_json_schema(...)` are available for explicit schema sanitization.
 - `!` API CHANGE: When serializing genai types to json, Optional fields with `None` are now omitted from JSON instead of serialized as `null`. ([migration guide](docs/migration/migration-v_0_6_to_0_7.md) | [merged PR search](https://github.com/jeremychone/rust-genai/pulls?q=is%3Apr+is%3Amerged+in%3Atitle+%22types+json+serialization+now+skip+none%22))
 - `!` Cargo feature: reqwest's `system-proxy` is now the genai `system-proxy` feature, enabled by default. Builds with `default-features = false` no longer read the macOS and Windows system proxy settings unless `system-proxy` is enabled. Proxy environment variables are still honored. (PR #334)
+- `!` API CHANGE: `ContentPart::ThoughtSignature` now carries a `ThoughtSignature { signature, origin: Option<ThoughtOrigin> }` instead of a bare `String`; `ThoughtOrigin { adapter_kind, model_name, connection }` records who issued it. Deserialises from the object **and** the legacy bare string (`origin: None`), so stored messages still load. `MessageContent::thought_signatures()` / `ContentPart::as_thought_signature()` keep returning `&str`; new `thought_signature_parts()` / `as_thought_signature_part()` expose the typed part. `ChatMessage::assistant_tool_calls_with_thoughts` takes `Vec<ThoughtSignature>`. (theuth design 90)
+- `!` API CHANGE: `ModelName` serialises as a plain JSON string (the derived form emitted `{"Shared": ..}` and could not be read back) and deserialises from owned strings as well as borrowed ones.
 
 ### API Minor Changes (New Properties / Variants)
 
@@ -41,11 +43,15 @@
 - `+` Add `AdapterKind::ApiRoute`; exhaustive matches must handle the new variant. (PR #323)
 - `+` Add `AdapterKind::Mistral`; exhaustive matches must handle the new variant. (PR #328)
 - `+` Add `ClientBuilder::append_provider_config`, `ClientConfig::append_provider_config`, and `ClientConfig::provider_config` to configure per-adapter endpoint and auth targets declaratively without custom resolver closures. (PR #289)
+- `+` Add `ChatOptions::with_thought_connection(label)` / `ChatOptionsSet::thought_connection()`: the caller's label for the account or gateway a request goes to. Signatures captured from the response are tagged with it and later replayed only to a request with the same label.
 
 ### Behavior Refinement / Changes
 
 - Chat:
   - `-` Preserve each tool call's thought signatures when converting `Vec<ToolCall>` into an assistant message, avoiding duplicate OpenAI Responses reasoning items and incorrect Gemini signature pairing. ([#306](https://github.com/jeremychone/rust-genai/issues/306)) (PR #307)
+  - `!` Thought signatures are replayed only to their issuer: every capture path (Anthropic, OpenAI Responses stream + non-stream, Gemini, Gemini Interactions) stamps `ThoughtOrigin { adapter_kind, model_name, connection }`, and every request builder emits a signature iff `ThoughtSignature::readable_by(this adapter kind, options.thought_connection())`. Anything else — another provider, another connection, or an untagged legacy signature — is dropped together with the reasoning text it signs (nothing of a dropped block is sent as text; counts at `debug`). Fixes Anthropic `Invalid signature in thinking block` / OpenAI `invalid_encrypted_content` after switching a session between providers. `ToolCall.thought_signatures` stays as a field but is no longer a replay source on any adapter. `ContentPart::Custom` parts that carry a `model_iden` are forwarded only by the adapter kind that produced them (Anthropic, OpenAI-compatible `reasoning_details`); untagged ones are the caller's and are forwarded as before.
+  - `^` Anthropic pairs a `ThoughtSignature` with the `ReasoningContent` that follows it positionally (not by count); an all-Anthropic same-connection message serialises byte-identically to before.
+  - `+` OpenAI Responses non-streaming responses now capture `reasoning.encrypted_content` as a `ThoughtSignature` part, as the streamer already did.
 - Anthropic:
   - `-` Enable reasoning effort and adaptive thinking for Haiku 5+, avoiding rejected legacy `thinking.enabled` / `budget_tokens` payloads for effort-based requests. Recognize thinking as enabled by default and use a 128K default max output budget. Haiku 4.5 behavior is unchanged. (PR #329)
   - `Zero` now positively disables reasoning, whereas it previously triggered adaptive thinking.
