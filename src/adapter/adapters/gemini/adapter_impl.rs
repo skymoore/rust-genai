@@ -1183,7 +1183,7 @@ mod tests {
 			ToolResponse::new("call_123", "{}").with_fn_name("get_weather"),
 		)]);
 
-		let parts = GeminiAdapter::into_gemini_request_parts(&model_iden, chat_req).unwrap();
+		let parts = GeminiAdapter::into_gemini_request_parts(&model_iden, chat_req, None).unwrap();
 		let function_response = &parts.contents[0]["parts"][0]["functionResponse"];
 
 		assert_eq!(function_response["name"], "get_weather");
@@ -1195,7 +1195,7 @@ mod tests {
 		let model_iden = ModelIden::new(AdapterKind::Gemini, "gemini-2.5-flash");
 		let chat_req = ChatRequest::new(vec![ChatMessage::from(ToolResponse::new("call#get_weather#0", "{}"))]);
 
-		let parts = GeminiAdapter::into_gemini_request_parts(&model_iden, chat_req).unwrap();
+		let parts = GeminiAdapter::into_gemini_request_parts(&model_iden, chat_req, None).unwrap();
 		let function_response = &parts.contents[0]["parts"][0]["functionResponse"];
 
 		assert_eq!(function_response["name"], "get_weather");
@@ -1548,7 +1548,7 @@ mod tests {
 			.iter()
 			.map(|part| match part {
 				ContentPart::Text(text) => format!("text({text})"),
-				ContentPart::ThoughtSignature(signature) => format!("sig({signature})"),
+				ContentPart::ThoughtSignature(signature) => format!("sig({})", signature.signature),
 				ContentPart::ToolCall(call) => {
 					let mirrored = call.thought_signatures.as_ref().map(|s| s.join("+")).unwrap_or_default();
 					format!("call({}:{mirrored})", call.fn_arguments["path"].as_str().unwrap_or(""))
@@ -1556,6 +1556,11 @@ mod tests {
 				other => format!("{other:?}"),
 			})
 			.collect()
+	}
+
+	/// A signature as this adapter kind would have captured it (connection `None`).
+	fn own(signature: &str) -> ContentPart {
+		ContentPart::ThoughtSignature(ThoughtSignature::new(signature).with_origin(ThoughtOrigin::new(&gemini_3(), None)))
 	}
 
 	/// Gemini attaches a `thoughtSignature` to a specific part and wants it back on
@@ -1594,14 +1599,14 @@ mod tests {
 	fn each_call_goes_back_with_its_own_signature() {
 		let content = MessageContent::from_parts(vec![
 			ContentPart::Text("Reading both.".to_string()),
-			ContentPart::ThoughtSignature("sig-a".to_string()),
+			own("sig-a"),
 			ContentPart::ToolCall(call("/a")),
-			ContentPart::ThoughtSignature("sig-b".to_string()),
+			own("sig-b"),
 			ContentPart::ToolCall(call("/b")),
 		]);
 		let chat_req = ChatRequest::new(vec![ChatMessage::user("Read both."), ChatMessage::assistant(content)]);
 
-		let parts = GeminiAdapter::into_gemini_request_parts(&gemini_3(), chat_req).expect("request parts");
+		let parts = GeminiAdapter::into_gemini_request_parts(&gemini_3(), chat_req, None).expect("request parts");
 
 		let model_turn = &parts.contents[1]["parts"];
 		assert_eq!(model_turn[0], json!({"text": "Reading both."}));
@@ -1615,12 +1620,12 @@ mod tests {
 	#[test]
 	fn a_signature_on_a_text_part_rides_the_text_part_back() {
 		let content = MessageContent::from_parts(vec![
-			ContentPart::ThoughtSignature("sig-t".to_string()),
+			own("sig-t"),
 			ContentPart::Text("Done.".to_string()),
 		]);
 		let chat_req = ChatRequest::new(vec![ChatMessage::user("Hi"), ChatMessage::assistant(content)]);
 
-		let parts = GeminiAdapter::into_gemini_request_parts(&gemini_3(), chat_req).expect("request parts");
+		let parts = GeminiAdapter::into_gemini_request_parts(&gemini_3(), chat_req, None).expect("request parts");
 
 		assert_eq!(
 			parts.contents[1]["parts"],
@@ -1628,19 +1633,66 @@ mod tests {
 		);
 	}
 
-	/// A call that carries its signature only in the `thought_signatures` mirror —
-	/// a turn rebuilt from its tool calls alone — still sends it, instead of the
-	/// Gemini 3 validator stand-in.
+	/// A signature another provider or connection issued (or an untagged legacy one) never goes
+	/// back as a `thoughtSignature`; the `thought_signatures` mirror on the call is not a replay
+	/// source either. Gemini 3 gets the validator stand-in instead.
 	#[test]
-	fn a_mirrored_signature_on_the_call_is_honoured() {
+	fn foreign_signature_not_sent_as_thought_signature() {
+		let foreign = |kind: AdapterKind, connection: Option<&str>| {
+			ContentPart::ThoughtSignature(
+				ThoughtSignature::new("sig-x").with_origin(ThoughtOrigin::new(&ModelIden::new(kind, "m"), connection)),
+			)
+		};
 		let mut mirrored = call("/a");
 		mirrored.thought_signatures = Some(vec!["sig-m".to_string()]);
-		let content = MessageContent::from_parts(vec![ContentPart::ToolCall(mirrored)]);
-		let chat_req = ChatRequest::new(vec![ChatMessage::user("Read."), ChatMessage::assistant(content)]);
+		for part in [
+			foreign(AdapterKind::Anthropic, None),
+			foreign(AdapterKind::Gemini, Some("other-account")),
+			ContentPart::ThoughtSignature(ThoughtSignature::new("sig-legacy")),
+		] {
+			let content = MessageContent::from_parts(vec![part, ContentPart::ToolCall(mirrored.clone())]);
+			let chat_req = ChatRequest::new(vec![ChatMessage::user("Read."), ChatMessage::assistant(content)]);
 
-		let parts = GeminiAdapter::into_gemini_request_parts(&gemini_3(), chat_req).expect("request parts");
+			let parts = GeminiAdapter::into_gemini_request_parts(&gemini_3(), chat_req, None).expect("request parts");
 
-		assert_eq!(parts.contents[1]["parts"][0]["thoughtSignature"], "sig-m");
+			let model_turn = parts.contents[1]["parts"].as_array().expect("parts");
+			assert_eq!(model_turn.len(), 1);
+			assert_eq!(model_turn[0]["thoughtSignature"], "skip_thought_signature_validator");
+			assert!(!parts.contents[1].to_string().contains("sig-x"));
+			assert!(!parts.contents[1].to_string().contains("sig-m"));
+		}
+	}
+
+	/// A response captured under a connection label goes back when, and only when, the request
+	/// carries the same label.
+	#[test]
+	fn same_origin_thought_signature_round_trips() {
+		let options = ChatOptions::default().with_thought_connection("acct");
+		let response = GeminiAdapter::to_chat_response(
+			gemini_3(),
+			response_with_parts(json!([
+				{"functionCall": {"name": "read_file", "args": {"path": "/a"}}, "thoughtSignature": "sig-a"}
+			])),
+			ChatOptionsSet::default().with_chat_options(Some(&options)),
+		)
+		.expect("chat response");
+		let sig = response.content.thought_signature_parts()[0];
+		assert_eq!(sig.origin.as_ref().and_then(|o| o.connection.as_deref()), Some("acct"));
+
+		let chat_req = ChatRequest::new(vec![
+			ChatMessage::user("Read."),
+			ChatMessage::assistant(response.content.clone()),
+		]);
+		let parts =
+			GeminiAdapter::into_gemini_request_parts(&gemini_3(), chat_req, Some("acct")).expect("request parts");
+		assert_eq!(parts.contents[1]["parts"][0]["thoughtSignature"], "sig-a");
+
+		let chat_req = ChatRequest::new(vec![ChatMessage::user("Read."), ChatMessage::assistant(response.content)]);
+		let parts = GeminiAdapter::into_gemini_request_parts(&gemini_3(), chat_req, None).expect("request parts");
+		assert_eq!(
+			parts.contents[1]["parts"][0]["thoughtSignature"],
+			"skip_thought_signature_validator"
+		);
 	}
 
 	/// End to end: a two-call turn goes back in the shape the API returned it.
@@ -1660,7 +1712,7 @@ mod tests {
 			ChatMessage::assistant(response.content),
 		]);
 
-		let parts = GeminiAdapter::into_gemini_request_parts(&gemini_3(), chat_req).expect("request parts");
+		let parts = GeminiAdapter::into_gemini_request_parts(&gemini_3(), chat_req, None).expect("request parts");
 
 		let model_turn = parts.contents[1]["parts"].as_array().expect("parts");
 		let signatures: Vec<&str> = model_turn
