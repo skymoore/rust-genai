@@ -20,20 +20,37 @@ use tracing::error;
 use tracing::warn;
 use value_ext::JsonValueExt;
 
+fn openai_reasoning_effort_keyword(effort: &ReasoningEffort) -> Option<&'static str> {
+	match effort {
+		ReasoningEffort::Zero => Some("none"),
+		ReasoningEffort::Low => Some("low"),
+		ReasoningEffort::Medium => Some("medium"),
+		ReasoningEffort::High => Some("high"),
+		ReasoningEffort::XHigh => Some("xhigh"),
+		ReasoningEffort::Max => Some("max"),
+		ReasoningEffort::Minimal => Some("minimal"),
+		ReasoningEffort::Budget(_) => None,
+	}
+}
+
 fn insert_openai_reasoning_effort(payload: &mut Value, effort: &ReasoningEffort) -> Result<()> {
-	let keyword = match effort {
-		ReasoningEffort::Zero => "none",
-		ReasoningEffort::Low => "low",
-		ReasoningEffort::Medium => "medium",
-		ReasoningEffort::High => "high",
-		ReasoningEffort::XHigh => "xhigh",
-		ReasoningEffort::Max => "max",
-		ReasoningEffort::Minimal => "minimal",
-		ReasoningEffort::Budget(_) => return Ok(()),
+	if let Some(keyword) = openai_reasoning_effort_keyword(effort) {
+		payload.x_insert("reasoning_effort", keyword)?;
+	}
+	Ok(())
+}
+
+/// OpenRouter's unified `reasoning` object: `{"effort": …}` or, for a token budget, `{"max_tokens": n}`.
+/// See <https://openrouter.ai/docs/use-cases/reasoning-tokens>.
+fn insert_openrouter_reasoning(payload: &mut Value, effort: &ReasoningEffort) -> Result<()> {
+	let reasoning = match effort {
+		ReasoningEffort::Budget(max_tokens) => json!({"max_tokens": max_tokens}),
+		other => match openai_reasoning_effort_keyword(other) {
+			Some(keyword) => json!({"effort": keyword}),
+			None => return Ok(()),
+		},
 	};
-
-	payload.x_insert("reasoning_effort", keyword)?;
-
+	payload.x_insert("reasoning", reasoning)?;
 	Ok(())
 }
 
@@ -100,12 +117,22 @@ impl OpenAIAdapter {
 		// NOTE: useful for local providers
 		let allow_anonymous = matches!(auth, AuthData::None) && custom.as_ref().is_some_and(|c| c.allow_no_api_key);
 
-		let headers = if !allow_anonymous {
+		let mut headers = if !allow_anonymous {
 			let api_key = get_api_key(auth, &model)?;
 			Headers::from(("Authorization".to_string(), format!("Bearer {api_key}")))
 		} else {
 			Headers::default()
 		};
+
+		let is_openrouter = matches!(model.adapter_kind, AdapterKind::OpenRouter);
+		if is_openrouter {
+			// OpenRouter app attribution; callers override via `ChatOptions::with_extra_headers`
+			// (the client merges those after the adapter headers).
+			headers.merge([
+				("HTTP-Referer".to_string(), "https://theuth.io".to_string()),
+				("X-OpenRouter-Title".to_string(), "theuth".to_string()),
+			]);
+		}
 
 		let stream = matches!(service_type, ServiceType::ChatStream);
 		let managed_body_thinking = custom.as_ref().is_some_and(|custom| custom.managed_body_thinking);
@@ -141,7 +168,9 @@ impl OpenAIAdapter {
 
 		// -- Set reasoning effort
 		if let Some(reasoning_effort) = reasoning_effort.as_ref() {
-			if managed_body_thinking {
+			if is_openrouter {
+				insert_openrouter_reasoning(&mut payload, reasoning_effort)?;
+			} else if managed_body_thinking {
 				let thinking_type = if matches!(reasoning_effort, ReasoningEffort::Zero) {
 					"disabled"
 				} else {
@@ -249,6 +278,16 @@ impl OpenAIAdapter {
 			};
 			if let Some(prompt_cache_retention) = prompt_cache_retention {
 				payload.x_insert("prompt_cache_retention", prompt_cache_retention)?;
+			}
+		}
+
+		// -- OpenRouter extensions
+		if is_openrouter {
+			if options_set.openrouter_cache_control() == Some(true) {
+				payload.x_insert("cache_control", json!({"type": "ephemeral"}))?;
+			}
+			if let Some(provider) = options_set.openrouter_provider() {
+				payload.x_insert("provider", provider.clone())?;
 			}
 		}
 
