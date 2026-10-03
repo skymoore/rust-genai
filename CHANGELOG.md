@@ -65,6 +65,12 @@
 - `+` Adapter - Add `AdapterKind::all()` to enumerate built-in adapters, excluding `Custom`. (PR #286)
 - `+` Error - Add `Error::status()` and `webc::Error::status()` accessors for HTTP status inspection. (PR #287)
 - `+` Chat - Add `ChatFrameSink` and `ChatOptions::with_raw_frame_sink` / `with_raw_frame_fn` to observe raw stream frames across providers. (PR #290)
+- `+` Usage - Lift a gateway-injected billed cost into `Usage.cost` (`UsageCostSource::ProviderReported`, USD) for the Anthropic, OpenAI chat and OpenAI Responses adapters: OpenCode Zen's top-level `"cost"` string on non-stream bodies and its trailing stream frames (`event: ping` `{"type":"ping","cost"}` on the Anthropic/Responses formats, `{"choices":[],"cost"}` on chat). The streamers now hold the `End` event until the connection closes (or the cost frame arrives) so a cost sent after `message_stop` / `response.completed` / `[DONE]` still lands in `captured_usage`; a plain Anthropic `ping` remains a `Heartbeat`. `Usage.cost` also deserializes from decimal strings.
+- OpenRouter:
+  - `+` Default attribution headers `HTTP-Referer: https://theuth.io` and `X-OpenRouter-Title: theuth` on every request; override with `ChatOptions::with_extra_headers` (same header names).
+  - `+` Accept `OPENROUTER_API_KEY` ahead of `OPEN_ROUTER_API_KEY` in `default_auth` (first set wins; `AdapterKind::OpenRouter.default_key_env_name()` still reports `OPEN_ROUTER_API_KEY`). Pass-through adapters gain the optional `key_env_alt` macro parameter for this.
+  - `!` `ReasoningEffort` is sent as OpenRouter's unified `reasoning` object (`{"effort": …}`, `Budget(n)` → `{"max_tokens": n}`) instead of chat `reasoning_effort`; plain `AdapterKind::OpenAI` is unchanged.
+  - `+` `ChatOptions::with_openrouter_cache_control(true)` emits top-level `cache_control: {"type":"ephemeral"}`; `ChatOptions::with_openrouter_provider(json)` emits the top-level `provider` routing object verbatim. Both are ignored by every other adapter.
 - Anthropic:
   - `+` Expose streaming SSE ping messages as provider-neutral `ChatStreamEvent::Heartbeat` events, allowing callers to distinguish a live long-running stream from a stall. (PR #271)
   - `+` Add prompt caching on tools via `Tool::with_cache_control`, and make request-level `ChatOptions::with_cache_control` automatically apply a cache breakpoint to the static (tools+system) prefix, which was previously ignored. `Ephemeral24h` is documented as clamped to Anthropic's max `1h` TTL.
