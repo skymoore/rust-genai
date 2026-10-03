@@ -4,7 +4,8 @@ use crate::adapter::{Adapter, AdapterKind, ServiceType, WebRequestData};
 use crate::chat::{
 	Binary, BinarySource, ChatOptionsSet, ChatRequest, ChatResponse, ChatResponseFormat, ChatRole, ChatStream,
 	ChatStreamResponse, CompletionTokensDetails, ContentPart, MessageContent, PromptTokensDetails, ReasoningEffort,
-	StopReason, Tool, ToolCall, ToolChoice, ToolConfig, ToolName, ToolResponse, Usage,
+	StopReason, ThoughtOrigin, ThoughtSignature, Tool, ToolCall, ToolChoice, ToolConfig, ToolName, ToolResponse,
+	Usage,
 };
 use crate::resolver::{AuthData, Endpoint};
 use crate::webc::{EventSourceStream, WebClient, WebResponse};
@@ -173,7 +174,7 @@ impl Adapter for GeminiAdapter {
 	fn to_chat_response(
 		model_iden: ModelIden,
 		web_response: WebResponse,
-		_options_set: ChatOptionsSet<'_, '_>,
+		options_set: ChatOptionsSet<'_, '_>,
 	) -> Result<ChatResponse> {
 		let WebResponse { mut body, .. } = web_response;
 
@@ -197,6 +198,10 @@ impl Adapter for GeminiAdapter {
 		// signatures on the first. Each call also mirrors its own signature in
 		// `thought_signatures`. Consecutive text parts still merge into one, as
 		// before; thought summaries go to `reasoning_content`.
+		let thought_origin = ThoughtOrigin::new(&model_iden, options_set.thought_connection());
+		let tag = |signature: String| {
+			ContentPart::ThoughtSignature(ThoughtSignature::new(signature).with_origin(thought_origin.clone()))
+		};
 		let mut parts: Vec<ContentPart> = Vec::new();
 		let mut reasoning_text = String::new();
 		let mut text_buffer = String::new();
@@ -214,13 +219,13 @@ impl Adapter for GeminiAdapter {
 					flush_text(&mut text_buffer, &mut parts);
 					if let Some(previous) = pending_signature.replace(signature) {
 						// Two signatures with nothing between them: keep both, in order.
-						parts.push(ContentPart::ThoughtSignature(previous));
+						parts.push(tag(previous));
 					}
 				}
 				GeminiChatContent::Text(text) => {
 					if let Some(signature) = pending_signature.take() {
 						flush_text(&mut text_buffer, &mut parts);
-						parts.push(ContentPart::ThoughtSignature(signature));
+						parts.push(tag(signature));
 					}
 					text_buffer.push_str(&text);
 				}
@@ -230,14 +235,14 @@ impl Adapter for GeminiAdapter {
 						// Mirrored on the call as well, so a turn rebuilt from its tool
 						// calls alone still carries it.
 						tool_call.thought_signatures = Some(vec![signature.clone()]);
-						parts.push(ContentPart::ThoughtSignature(signature));
+						parts.push(tag(signature));
 					}
 					parts.push(ContentPart::ToolCall(tool_call));
 				}
 				GeminiChatContent::Binary(binary) => {
 					flush_text(&mut text_buffer, &mut parts);
 					if let Some(signature) = pending_signature.take() {
-						parts.push(ContentPart::ThoughtSignature(signature));
+						parts.push(tag(signature));
 					}
 					parts.push(ContentPart::Binary(binary));
 				}
@@ -246,7 +251,7 @@ impl Adapter for GeminiAdapter {
 		}
 		flush_text(&mut text_buffer, &mut parts);
 		if let Some(signature) = pending_signature {
-			parts.push(ContentPart::ThoughtSignature(signature));
+			parts.push(tag(signature));
 		}
 		let content = MessageContent::from_parts(parts);
 
@@ -446,7 +451,7 @@ impl GeminiAdapter {
 			system,
 			contents,
 			tools,
-		} = Self::into_gemini_request_parts(model, chat_req)?;
+		} = Self::into_gemini_request_parts(model, chat_req, options_set.thought_connection())?;
 
 		let mut payload = json!({});
 
@@ -624,10 +629,22 @@ impl GeminiAdapter {
 	/// - `ChatRole::System` is concatenated (with an empty line) into a single `system` for the system instruction.
 	///   - This adapter uses version v1beta, which supports `systemInstruction`
 	/// - The eventual `chat_req.system` is pushed first into the "systemInstruction"
+	/// - A `thoughtSignature` is replayed only when `model_iden.adapter_kind` issued it over
+	///   `thought_connection` (see `ThoughtSignature::readable_by`); anything else is dropped.
 	pub(in crate::adapter) fn into_gemini_request_parts(
 		model_iden: &ModelIden, // use for error reporting
 		chat_req: ChatRequest,
+		thought_connection: Option<&str>,
 	) -> Result<GeminiChatRequestParts> {
+		let mut dropped_foreign = 0usize;
+		let mut readable = |sig: ThoughtSignature| -> Option<String> {
+			if sig.readable_by(model_iden.adapter_kind, thought_connection) {
+				Some(sig.signature)
+			} else {
+				dropped_foreign += 1;
+				None
+			}
+		};
 		let mut contents: Vec<Value> = Vec::new();
 		let mut systems: Vec<String> = Vec::new();
 
@@ -689,9 +706,9 @@ impl GeminiAdapter {
 								}));
 							}
 							ContentPart::ThoughtSignature(thought) => {
-								parts_values.push(json!({
-									"thoughtSignature": thought
-								}));
+								if let Some(thought) = readable(thought) {
+									parts_values.push(json!({"thoughtSignature": thought}));
+								}
 							}
 
 							ContentPart::ReasoningContent(_) => {}
@@ -735,23 +752,15 @@ impl GeminiAdapter {
 										part_obj.insert("thoughtSignature".to_string(), json!(thought));
 									}
 									None => {
-										if let Some(mirrored) =
-											tool_call.thought_signatures.as_ref().and_then(|s| s.first())
-										{
-											// No signature part preceded this call, but the call carries its own
-											// (the mirror the response path sets): send that.
-											part_obj.insert("thoughtSignature".to_string(), json!(mirrored));
-										} else {
-											// For Gemini 3 models, if there haven't been any thoughts, and this is
-											// still the first tool call, we are required to inject a special flag.
-											// See: https://ai.google.dev/gemini-api/docs/thought-signatures#faqs
-											let is_gemini_3 = model_iden.model_name.contains("gemini-3");
-											if is_gemini_3 && is_first_tool_call {
-												part_obj.insert(
-													"thoughtSignature".to_string(),
-													json!("skip_thought_signature_validator"),
-												);
-											}
+										// For Gemini 3 models, if there haven't been any thoughts, and this is
+										// still the first tool call, we are required to inject a special flag.
+										// See: https://ai.google.dev/gemini-api/docs/thought-signatures#faqs
+										let is_gemini_3 = model_iden.model_name.contains("gemini-3");
+										if is_gemini_3 && is_first_tool_call {
+											part_obj.insert(
+												"thoughtSignature".to_string(),
+												json!("skip_thought_signature_validator"),
+											);
 										}
 									}
 								}
@@ -763,7 +772,7 @@ impl GeminiAdapter {
 								if let Some(prev_thought) = pending_thought.take() {
 									parts_values.push(json!({"thoughtSignature": prev_thought}));
 								}
-								pending_thought = Some(thought);
+								pending_thought = readable(thought);
 							}
 							// Ignore unsupported parts for Assistant role
 							ContentPart::Binary(_) => {
@@ -833,9 +842,9 @@ impl GeminiAdapter {
 								}
 							}
 							ContentPart::ThoughtSignature(thought) => {
-								parts_values.push(json!({
-									"thoughtSignature": thought
-								}));
+								if let Some(thought) = readable(thought) {
+									parts_values.push(json!({"thoughtSignature": thought}));
+								}
 							}
 							ContentPart::ReasoningContent(_) => {}
 							_ => {
@@ -850,6 +859,12 @@ impl GeminiAdapter {
 					contents.push(json!({"role": "user", "parts": parts_values}));
 				}
 			}
+		}
+		if dropped_foreign > 0 {
+			tracing::debug!(
+				dropped = dropped_foreign,
+				"gemini - dropped thought signatures issued by another provider or connection; not replayable here"
+			);
 		}
 
 		let system = if !systems.is_empty() {

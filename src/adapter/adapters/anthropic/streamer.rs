@@ -1,7 +1,7 @@
 use super::parse_cache_creation_details;
 use crate::adapter::adapters::support::{StreamerCapturedData, StreamerOptions, new_frame_tap};
 use crate::adapter::inter_stream::{InterStreamEnd, InterStreamEvent, InterStreamThoughtBlock};
-use crate::chat::{ChatOptionsSet, PromptTokensDetails, StopReason, ToolCall, Usage, UsageCost};
+use crate::chat::{ChatOptionsSet, PromptTokensDetails, StopReason, ThoughtOrigin, ThoughtSignature, ToolCall, Usage, UsageCost};
 use crate::webc::{Event, EventSourceStream};
 use crate::{Error, ModelIden, Result};
 use serde_json::{Map, Value};
@@ -67,11 +67,11 @@ impl ThinkingBlock {
 		}
 	}
 
-	fn into_thought_block(self) -> Option<InterStreamThoughtBlock> {
+	fn into_thought_block(self, origin: &ThoughtOrigin) -> Option<InterStreamThoughtBlock> {
 		let signature = self.signature.filter(|signature| !signature.is_empty())?;
 		Some(InterStreamThoughtBlock {
 			reasoning_content: self.reasoning,
-			signature,
+			signature: ThoughtSignature::new(signature).with_origin(origin.clone()),
 		})
 	}
 }
@@ -317,7 +317,7 @@ impl futures::Stream for AnthropicStreamer {
 									}
 								}
 								InProgressBlock::Thinking(thinking_block) => {
-									if let Some(block) = thinking_block.into_thought_block() {
+									if let Some(block) = thinking_block.into_thought_block(&self.options.thought_origin) {
 										self.captured_thought_blocks.push(block);
 									}
 								}

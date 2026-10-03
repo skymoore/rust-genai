@@ -1,5 +1,5 @@
 /// Note: MessageContent is used for ChatRequest and ChatResponse.
-use crate::chat::{Binary, ContentPart, CustomPart, ToolCall, ToolResponse};
+use crate::chat::{Binary, ContentPart, CustomPart, ThoughtSignature, ToolCall, ToolResponse};
 use serde::{Deserialize, Serialize};
 
 /// Message content container used in ChatRequest and ChatResponse.
@@ -184,6 +184,11 @@ impl MessageContent {
 	/// Return references to all ThoughtSignature parts as &str.
 	pub fn thought_signatures(&self) -> Vec<&str> {
 		self.parts.iter().filter_map(|p| p.as_thought_signature()).collect()
+	}
+
+	/// Return references to all ThoughtSignature parts (signature + origin).
+	pub fn thought_signature_parts(&self) -> Vec<&ThoughtSignature> {
+		self.parts.iter().filter_map(|p| p.as_thought_signature_part()).collect()
 	}
 
 	/// Consume and return all ThoughtSignature parts as owned Strings.

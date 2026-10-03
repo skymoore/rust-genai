@@ -89,6 +89,11 @@ pub struct ChatOptions {
 	/// Additional HTTP headers to include with the request.
 	pub extra_headers: Option<Headers>,
 
+	/// The caller's label for the account or gateway this request goes to; signatures captured
+	/// from the response are tagged with it and later replayed only to a request with the same
+	/// label (see [`crate::chat::ThoughtSignature::readable_by`]).
+	pub thought_connection: Option<String>,
+
 	// -- Prompt cache options
 	/// Request-level cache control preference.
 	pub cache_control: Option<CacheControl>,
@@ -247,6 +252,12 @@ impl ChatOptions {
 	/// Adds extra HTTP headers.
 	pub fn with_extra_headers(mut self, headers: impl Into<Headers>) -> Self {
 		self.extra_headers = Some(headers.into());
+		self
+	}
+
+	/// Sets the thought-connection label; see [`ChatOptions::thought_connection`].
+	pub fn with_thought_connection(mut self, label: impl Into<String>) -> Self {
+		self.thought_connection = Some(label.into());
 		self
 	}
 
@@ -677,6 +688,12 @@ impl ChatOptionsSet<'_, '_> {
 		self.chat
 			.and_then(|chat| chat.extra_headers.as_ref())
 			.or_else(|| self.client.and_then(|client| client.extra_headers.as_ref()))
+	}
+
+	pub fn thought_connection(&self) -> Option<&str> {
+		self.chat
+			.and_then(|chat| chat.thought_connection.as_deref())
+			.or_else(|| self.client.and_then(|client| client.thought_connection.as_deref()))
 	}
 
 	pub fn prompt_cache_key(&self) -> Option<&str> {

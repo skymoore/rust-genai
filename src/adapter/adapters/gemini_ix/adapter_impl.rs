@@ -5,8 +5,8 @@ use crate::adapter::adapters::support::get_api_key;
 use crate::adapter::{Adapter, AdapterDispatcher, AdapterKind, ServiceType, WebRequestData};
 use crate::chat::{
 	Binary, BinarySource, ChatMessage, ChatOptionsSet, ChatRequest, ChatResponse, ChatResponseFormat, ChatRole,
-	ChatStream, ChatStreamResponse, ContentPart, MessageContent, ReasoningEffort, Tool, ToolChoice, ToolName,
-	ToolResponse, Usage,
+	ChatStream, ChatStreamResponse, ContentPart, MessageContent, ReasoningEffort, ThoughtOrigin, Tool, ToolChoice,
+	ToolName, ToolResponse, Usage,
 };
 use crate::resolver::{AuthData, Endpoint};
 use crate::webc::{EventSourceStream, WebClient, WebResponse};
@@ -14,7 +14,7 @@ use crate::{Error, Headers, Result};
 use crate::{ModelIden, ServiceTarget};
 use reqwest::RequestBuilder;
 use serde_json::{Map, Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use value_ext::JsonValueExt;
 
 pub struct GeminiIxAdapter;
@@ -175,7 +175,7 @@ impl Adapter for GeminiIxAdapter {
 		if let Some(system) = system {
 			systems.push(system);
 		}
-		let input_steps = Self::into_ix_input_steps(&model, messages, &mut systems)?;
+		let input_steps = Self::into_ix_input_steps(&model, messages, &mut systems, chat_options.thought_connection())?;
 
 		let store = explicit_store.unwrap_or(true);
 		if previous_response_id.is_some() && explicit_store == Some(false) {
@@ -291,21 +291,19 @@ impl Adapter for GeminiIxAdapter {
 		let usage = interaction.usage.map(Usage::from).unwrap_or_default();
 
 		// -- Walk the step timeline into content parts
+		let thought_origin = ThoughtOrigin::new(&model_iden, options_set.thought_connection());
 		let mut parts: Vec<ContentPart> = Vec::new();
 		let mut reasoning = String::new();
 		for step in interaction.steps {
-			parts.extend(step.into_content_parts(&mut reasoning));
+			parts.extend(step.into_content_parts(&mut reasoning, &thought_origin));
 		}
 
 		// Mirror the Gemini `generateContent` adapter: also hang the signatures off the first tool
-		// call. `ChatResponse::into_tool_calls()` drops the standalone `ThoughtSignature` parts, and
-		// the API rejects a replayed `function_call` that is not preceded by its `thought` step.
+		// call (`ChatResponse::into_tool_calls()` drops the standalone `ThoughtSignature` parts).
+		// The mirror is informational only; the request path replays signature parts, never it.
 		let signatures: Vec<String> = parts
 			.iter()
-			.filter_map(|part| match part {
-				ContentPart::ThoughtSignature(signature) => Some(signature.clone()),
-				_ => None,
-			})
+			.filter_map(|part| part.as_thought_signature().map(str::to_string))
 			.collect();
 		if !signatures.is_empty()
 			&& let Some(ContentPart::ToolCall(first_call)) =
@@ -370,14 +368,18 @@ impl Adapter for GeminiIxAdapter {
 
 /// Support functions
 impl GeminiIxAdapter {
+	/// `thought` steps are replayed only for signatures `model_iden.adapter_kind` issued over
+	/// `thought_connection` (see `ThoughtSignature::readable_by`); a turn left without one gets
+	/// the validator stand-in before its first function call.
 	fn into_ix_input_steps(
 		model_iden: &ModelIden,
 		messages: Vec<ChatMessage>,
 		systems: &mut Vec<String>,
+		thought_connection: Option<&str>,
 	) -> Result<Vec<Value>> {
 		let mut steps: Vec<Value> = Vec::new();
-		let mut emitted_signatures: HashSet<String> = HashSet::new();
 		let mut tool_call_names: HashMap<String, String> = HashMap::new();
+		let mut dropped_foreign = 0usize;
 
 		for msg in messages {
 			match msg.role {
@@ -425,20 +427,15 @@ impl GeminiIxAdapter {
 							ContentPart::Binary(binary) => content.push(binary_to_ix_content(binary)),
 							ContentPart::ThoughtSignature(signature) => {
 								flush_content_step(&mut steps, &mut content, "model_output");
-								if emitted_signatures.insert(signature.clone()) {
-									steps.push(json!({"type": "thought", "signature": signature}));
+								if signature.readable_by(model_iden.adapter_kind, thought_connection) {
+									steps.push(json!({"type": "thought", "signature": signature.signature}));
 									turn_has_thought = true;
+								} else {
+									dropped_foreign += 1;
 								}
 							}
 							ContentPart::ToolCall(tool_call) => {
 								flush_content_step(&mut steps, &mut content, "model_output");
-
-								for signature in tool_call.thought_signatures.into_iter().flatten() {
-									if emitted_signatures.insert(signature.clone()) {
-										steps.push(json!({"type": "thought", "signature": signature}));
-										turn_has_thought = true;
-									}
-								}
 
 								// Needed for server side tools (search, urlContext, etc.,)
 								if !turn_has_thought {
@@ -466,6 +463,12 @@ impl GeminiIxAdapter {
 					flush_content_step(&mut steps, &mut content, "model_output");
 				}
 			}
+		}
+		if dropped_foreign > 0 {
+			tracing::debug!(
+				dropped = dropped_foreign,
+				"gemini_ix - dropped thought signatures issued by another provider or connection; not replayable here"
+			);
 		}
 
 		Ok(steps)

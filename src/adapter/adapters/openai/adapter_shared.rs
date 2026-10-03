@@ -483,8 +483,13 @@ impl OpenAIAdapter {
 							ContentPart::ThoughtSignature(_) => {}
 							// OpenRouter's reasoning blocks, captured verbatim by the response path,
 							// go back verbatim: a signed or encrypted block cannot be rebuilt from
-							// the plaintext, and the gateway requires the original sequence.
-							ContentPart::Custom(custom) if is_reasoning_detail(&custom) => {
+							// the plaintext, and the gateway requires the original sequence. Only
+							// blocks this adapter kind produced (or the caller built untagged) are
+							// echoed; another gateway's blocks would be rejected.
+							ContentPart::Custom(custom)
+								if is_reasoning_detail(&custom)
+									&& custom.adapter_kind().is_none_or(|k| k == model_iden.adapter_kind) =>
+							{
 								reasoning_details.push(custom.data)
 							}
 							// Other Custom parts are ignored for this logic

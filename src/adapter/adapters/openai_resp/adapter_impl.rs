@@ -11,7 +11,8 @@ use crate::adapter::adapters::support::get_api_key;
 use crate::adapter::{Adapter, AdapterDispatcher, AdapterKind, ServiceType, WebRequestData};
 use crate::chat::{
 	CacheControl, ChatOptionsSet, ChatRequest, ChatResponse, ChatRole, ChatStream, ChatStreamResponse, ContentPart,
-	MessageContent, ReasoningEffort, StopReason, Tool, ToolChoice, ToolConfig, ToolName, Usage,
+	MessageContent, ReasoningEffort, StopReason, ThoughtOrigin, ThoughtSignature, Tool, ToolChoice, ToolConfig,
+	ToolName, Usage,
 };
 use crate::resolver::{AuthData, Endpoint};
 use crate::webc::{EventSourceStream, WebClient, WebResponse};
@@ -139,7 +140,12 @@ impl Adapter for OpenAIRespAdapter {
 		let OpenAIRespRequestParts {
 			input_items: messages,
 			tools,
-		} = Self::into_openai_request_parts(&model, chat_req, prompt_cache_policy.as_ref())?;
+		} = Self::into_openai_request_parts(
+			&model,
+			chat_req,
+			prompt_cache_policy.as_ref(),
+			chat_options.thought_connection(),
+		)?;
 
 		// Store: always opt-in. If not explicitly set, default is false.
 		// Privacy first: we never implicitly set store=true, even when previous_response_id is set.
@@ -325,9 +331,22 @@ impl Adapter for OpenAIRespAdapter {
 		// -- Capture the content
 		let mut content: MessageContent = MessageContent::default();
 		let reasoning_content: Option<String> = None;
+		let thought_origin = ThoughtOrigin::new(&model_iden, options_set.thought_connection());
 
 		// -- Extract the content message
 		for output_item in resp.output {
+			// `reasoning` items carry the encrypted continuation blob (`store: false` +
+			// `include: ["reasoning.encrypted_content"]`); the streamer captures the same thing.
+			if output_item.x_get_str("type").ok() == Some("reasoning") {
+				if let Ok(encrypted) = output_item.x_get_str("encrypted_content")
+					&& !encrypted.is_empty()
+				{
+					content.push(ContentPart::ThoughtSignature(
+						ThoughtSignature::new(encrypted).with_origin(thought_origin.clone()),
+					));
+				}
+				continue;
+			}
 			let parts = ContentPart::from_resp_output_item(output_item)?;
 			content.extend(parts);
 		}
@@ -413,11 +432,13 @@ impl OpenAIRespAdapter {
 	/// Takes the genai ChatMessages and builds the OpenAIChatRequestParts
 	/// - `genai::ChatRequest.system`, if present, is added as the first message with role 'system'.
 	/// - All messages get added with the corresponding roles (tools are not supported for now)
-	///
+	/// - Prior-turn `reasoning.encrypted_content` blobs are replayed only when this adapter kind
+	///   issued them over `thought_connection` (see `ThoughtSignature::readable_by`).
 	fn into_openai_request_parts(
 		model_iden: &ModelIden,
 		chat_req: ChatRequest,
 		cache_policy: Option<&OpenAiPromptCachePolicy>,
+		thought_connection: Option<&str>,
 	) -> Result<OpenAIRespRequestParts> {
 		let mut input_items: Vec<Value> = Vec::new();
 		let custom_tool_names = chat_req
@@ -552,30 +573,30 @@ impl OpenAIRespAdapter {
 					// token. They precede the assistant message they belong to,
 					// mirroring the order the API emits them in the streaming
 					// response. The blobs ride in on `ContentPart::ThoughtSignature`
-					// parts (from `StreamEnd::captured_content`) or on
-					// `ToolCall::thought_signatures` (rust-genai's streamer stashes
-					// captured blobs there when there are tool calls).
+					// parts (from `StreamEnd::captured_content`). A blob another
+					// provider or connection issued (or an untagged legacy one) is
+					// dropped: OpenAI 400s (`invalid_encrypted_content`) on content
+					// it cannot decrypt.
+					let mut dropped_foreign = 0usize;
 					for part in msg.content.iter() {
-						if let ContentPart::ThoughtSignature(blob) = part {
-							input_items.push(json!({
-								"type": "reasoning",
-								"encrypted_content": blob,
-								"summary": [],
-							}));
-						}
-					}
-					for part in msg.content.iter() {
-						if let ContentPart::ToolCall(tool_call) = part
-							&& let Some(sigs) = tool_call.thought_signatures.as_ref()
-						{
-							for blob in sigs {
+						if let ContentPart::ThoughtSignature(sig) = part {
+							if sig.readable_by(model_iden.adapter_kind, thought_connection) {
 								input_items.push(json!({
 									"type": "reasoning",
-									"encrypted_content": blob,
+									"encrypted_content": sig.signature,
 									"summary": [],
 								}));
+							} else {
+								dropped_foreign += 1;
 							}
 						}
+					}
+					if dropped_foreign > 0 {
+						tracing::debug!(
+							dropped = dropped_foreign,
+							"openai_resp - dropped encrypted reasoning blobs issued by another provider or \
+							 connection; not replayable here"
+						);
 					}
 
 					for part in msg.content {
@@ -975,7 +996,7 @@ mod tests {
 			.append_message(ChatMessage::assistant("The weather is sunny."));
 
 		// Serialize to OpenAI Responses API format
-		let parts = OpenAIRespAdapter::into_openai_request_parts(&model_iden, chat_req, None)
+		let parts = OpenAIRespAdapter::into_openai_request_parts(&model_iden, chat_req, None, None)
 			.expect("Should serialize successfully");
 
 		// Find the assistant message in input_items
@@ -1200,6 +1221,86 @@ mod tests {
 		assert_eq!(response.usage.prompt_tokens, Some(12));
 		assert_eq!(response.first_text(), Some("ok"));
 	}
+
+	// region:    --- thought-signature provenance
+
+	fn reasoning_items(parts: &OpenAIRespRequestParts) -> Vec<&Value> {
+		parts
+			.input_items
+			.iter()
+			.filter(|item| item["type"] == "reasoning")
+			.collect()
+	}
+
+	fn tagged(sig: &str, kind: AdapterKind, connection: Option<&str>) -> ContentPart {
+		ContentPart::ThoughtSignature(
+			ThoughtSignature::new(sig).with_origin(ThoughtOrigin::new(&ModelIden::new(kind, "m"), connection)),
+		)
+	}
+
+	#[test]
+	fn anthropic_signature_is_not_sent_as_encrypted_content() {
+		let model_iden = ModelIden::new(AdapterKind::OpenAIResp, "gpt-5");
+		let assistant = ChatMessage::assistant(MessageContent::from_parts(vec![
+			tagged("ant-sig", AdapterKind::Anthropic, None),
+			ContentPart::ReasoningContent("thinking…".to_string()),
+			ContentPart::Text("answer".to_string()),
+		]));
+		let chat_req = ChatRequest::new(vec![ChatMessage::user("q"), assistant]);
+
+		let parts = OpenAIRespAdapter::into_openai_request_parts(&model_iden, chat_req, None, None).unwrap();
+
+		assert!(reasoning_items(&parts).is_empty(), "{:?}", parts.input_items);
+		assert_eq!(parts.input_items[1]["role"], "assistant");
+		assert_eq!(parts.input_items[1]["content"][0]["text"], "answer");
+
+		// Same adapter, other connection; and the untagged legacy string: both dropped.
+		for part in [
+			tagged("sig", AdapterKind::OpenAIResp, Some("zen")),
+			ContentPart::ThoughtSignature(ThoughtSignature::new("legacy")),
+		] {
+			let chat_req = ChatRequest::new(vec![ChatMessage::assistant(MessageContent::from_parts(vec![part]))]);
+			let parts =
+				OpenAIRespAdapter::into_openai_request_parts(&model_iden, chat_req, None, Some("direct")).unwrap();
+			assert!(reasoning_items(&parts).is_empty(), "{:?}", parts.input_items);
+		}
+	}
+
+	#[test]
+	fn same_origin_encrypted_content_round_trips() {
+		let model_iden = ModelIden::new(AdapterKind::OpenAIResp, "gpt-5");
+		let options = ChatOptions::default().with_thought_connection("direct");
+		let response = OpenAIRespAdapter::to_chat_response(
+			model_iden.clone(),
+			WebResponse {
+				status: reqwest::StatusCode::OK,
+				body: json!({
+					"id": "resp_1",
+					"status": "completed",
+					"model": "gpt-5",
+					"output": [
+						{"type": "reasoning", "id": "rs_1", "encrypted_content": "blob-1", "summary": []},
+						{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}
+					]
+				}),
+			},
+			ChatOptionsSet::default().with_chat_options(Some(&options)),
+		)
+		.unwrap();
+		let sig = response.content.thought_signature_parts()[0];
+		assert_eq!(sig.signature, "blob-1");
+		assert!(sig.readable_by(AdapterKind::OpenAIResp, Some("direct")));
+
+		let chat_req = ChatRequest::new(vec![ChatMessage::user("q"), ChatMessage::assistant(response.content)]);
+		let parts =
+			OpenAIRespAdapter::into_openai_request_parts(&model_iden, chat_req, None, Some("direct")).unwrap();
+		assert_eq!(
+			reasoning_items(&parts),
+			vec![&json!({"type": "reasoning", "encrypted_content": "blob-1", "summary": []})]
+		);
+	}
+
+	// endregion: --- thought-signature provenance
 }
 
 // endregion: --- Tests

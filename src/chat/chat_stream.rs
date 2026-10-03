@@ -455,7 +455,7 @@ mod tests {
 	#[test]
 	fn stream_end_orders_signature_text_and_tool_call_and_mirrors_signature() {
 		let inter_end = InterStreamEnd {
-			captured_thought_signatures: Some(vec!["opaque-signature".to_string()]),
+			captured_thought_signatures: Some(vec![crate::chat::ThoughtSignature::new("opaque-signature")]),
 			captured_text_content: Some("visible text".to_string()),
 			captured_tool_calls: Some(vec![ToolCall {
 				call_id: "call-1".to_string(),
@@ -468,7 +468,7 @@ mod tests {
 
 		let end = StreamEnd::from(inter_end);
 		let parts = end.captured_content.as_ref().expect("captured content").parts();
-		assert!(matches!(&parts[0], ContentPart::ThoughtSignature(signature) if signature == "opaque-signature"));
+		assert!(matches!(&parts[0], ContentPart::ThoughtSignature(sig) if sig.signature == "opaque-signature"));
 		assert!(matches!(&parts[1], ContentPart::Text(text) if text == "visible text"));
 		assert!(matches!(&parts[2], ContentPart::ToolCall(_)));
 
