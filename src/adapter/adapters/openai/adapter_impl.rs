@@ -2,7 +2,7 @@ use super::OpenAIStreamer;
 use crate::adapter::{Adapter, AdapterKind, ServiceType, WebRequestData};
 use crate::chat::{
 	ChatOptionsSet, ChatRequest, ChatResponse, ChatStream, ChatStreamResponse, ContentPart, MessageContent, StopReason,
-	ToolCall,
+	ToolCall, UsageCost,
 };
 use crate::resolver::{AuthData, Endpoint};
 use crate::webc::{EventSourceStream, WebClient, WebResponse};
@@ -68,11 +68,14 @@ impl Adapter for OpenAIAdapter {
 		let provider_model_name: Option<String> = body.x_remove("model").ok();
 		let provider_model_iden = model_iden.from_optional_name(provider_model_name);
 
-		// -- Capture the usage
-		let usage = body
+		// -- Capture the usage (a gateway-injected top-level `cost`, e.g. OpenCode Zen, is the billed amount and wins)
+		let mut usage = body
 			.x_take("usage")
 			.map(|value| OpenAIAdapter::into_usage(model_iden.adapter_kind, value))
 			.unwrap_or_default();
+		if let Some(cost) = body.get("cost").and_then(UsageCost::provider_reported) {
+			usage.cost = Some(cost);
+		}
 
 		// -- Capture the content
 		let mut content: MessageContent = MessageContent::default();
@@ -333,6 +336,30 @@ mod tests {
 			.expect("chat response");
 
 		assert_eq!(response.stop_reason, None);
+	}
+
+	#[test]
+	fn test_to_chat_response_lifts_zen_top_level_cost() {
+		// OpenCode Zen injects the billed USD amount as a top-level string on the chat body.
+		let web_response = WebResponse {
+			status: StatusCode::OK,
+			body: serde_json::json!({
+				"id": "chatcmpl-test",
+				"model": "gpt-4o-mini-2024-07-18",
+				"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+				"choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "hello"}}],
+				"cost": "0.00123400"
+			}),
+		};
+
+		let response = OpenAIAdapter::to_chat_response(test_model(), web_response, ChatOptionsSet::default())
+			.expect("chat response");
+
+		let cost = response.usage.cost.as_ref().expect("cost");
+		assert_eq!(cost.amount, 0.001234);
+		assert_eq!(cost.currency, "USD");
+		assert_eq!(cost.source, crate::chat::UsageCostSource::ProviderReported);
+		assert_eq!(response.usage.prompt_tokens, Some(10));
 	}
 
 	/// OpenRouter returns the provider's own reasoning blocks — signed text,

@@ -8,7 +8,7 @@ use crate::chat::{
 	Binary, BinarySource, CacheControl, CacheCreationDetails, ChatOptionsSet, ChatRequest, ChatResponse,
 	ChatResponseFormat, ChatRole, CompletionTokensDetails, ContentPart, JsonSchemaDialect, MessageContent,
 	PromptTokensDetails, ReasoningEffort, StopReason, Tool, ToolCall, ToolChoice, ToolConfig, ToolName, ToolResponse,
-	Usage, sanitize_json_schema,
+	Usage, UsageCost, sanitize_json_schema,
 };
 use crate::resolver::{AuthData, Endpoint};
 use crate::webc::{WebClient, WebResponse};
@@ -586,10 +586,13 @@ impl AnthropicAdapter {
 		let provider_model_name: Option<String> = body.x_remove("model").ok();
 		let provider_model_iden = model_iden.from_optional_name(provider_model_name);
 
-		// -- Capture the usage
+		// -- Capture the usage (a gateway-injected top-level `cost`, e.g. OpenCode Zen, is the billed amount)
 		let usage = body.x_take::<Value>("usage");
 
-		let usage = usage.map(Self::into_usage).unwrap_or_default();
+		let mut usage = usage.map(Self::into_usage).unwrap_or_default();
+		if let Some(cost) = body.get("cost").and_then(UsageCost::provider_reported) {
+			usage.cost = Some(cost);
+		}
 		let stop_reason = body
 			.x_take::<Option<String>>("stop_reason")
 			.ok()
