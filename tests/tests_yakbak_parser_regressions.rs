@@ -121,9 +121,9 @@ async fn gemini_nonstream_keeps_signature_on_function_call() -> TestResult<()> {
 		Some(["fixture-signature".to_string()].as_slice())
 	);
 	let parts = response.content.parts();
-	assert!(matches!(&parts[0], ContentPart::ThoughtSignature(s) if s == "fixture-text-signature"));
+	assert!(matches!(&parts[0], ContentPart::ThoughtSignature(s) if s.signature == "fixture-text-signature"));
 	assert!(matches!(&parts[1], ContentPart::Text(s) if s == "Checking Cairo."));
-	assert!(matches!(&parts[2], ContentPart::ThoughtSignature(s) if s == "fixture-signature"));
+	assert!(matches!(&parts[2], ContentPart::ThoughtSignature(s) if s.signature == "fixture-signature"));
 	assert!(matches!(&parts[3], ContentPart::ToolCall(_)));
 	assert!(matches!(&parts[4], ContentPart::Text(s) if s == "Done."));
 	Ok(())

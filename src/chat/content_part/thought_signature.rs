@@ -127,7 +127,10 @@ mod tests {
 		assert_eq!(object.signature, "abc");
 		assert_eq!(
 			object.origin,
-			Some(ThoughtOrigin::new(&ModelIden::new(AdapterKind::Anthropic, "claude"), Some("work")))
+			Some(ThoughtOrigin::new(
+				&ModelIden::new(AdapterKind::Anthropic, "claude"),
+				Some("work")
+			))
 		);
 
 		// Legacy assistant message as `ChatMessage` serialised it before this type existed.
