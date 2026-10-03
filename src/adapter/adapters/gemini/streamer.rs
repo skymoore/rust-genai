@@ -152,10 +152,7 @@ impl futures::Stream for GeminiStreamer {
 					if let Some(thought) = stream_thought {
 						let tagged = crate::chat::ThoughtSignature::new(thought.clone())
 							.with_origin(self.options.thought_origin.clone());
-						self.captured_data
-							.thought_signatures
-							.get_or_insert_with(Vec::new)
-							.push(tagged);
+						self.captured_data.thought_signatures.get_or_insert_with(Vec::new).push(tagged);
 						self.pending_events.push_back(InterStreamEvent::ThoughtSignatureChunk(thought));
 					}
 

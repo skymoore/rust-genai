@@ -4,8 +4,7 @@ use crate::adapter::{Adapter, AdapterKind, ServiceType, WebRequestData};
 use crate::chat::{
 	Binary, BinarySource, ChatOptionsSet, ChatRequest, ChatResponse, ChatResponseFormat, ChatRole, ChatStream,
 	ChatStreamResponse, CompletionTokensDetails, ContentPart, MessageContent, PromptTokensDetails, ReasoningEffort,
-	StopReason, ThoughtOrigin, ThoughtSignature, Tool, ToolCall, ToolChoice, ToolConfig, ToolName, ToolResponse,
-	Usage,
+	StopReason, ThoughtOrigin, ThoughtSignature, Tool, ToolCall, ToolChoice, ToolConfig, ToolName, ToolResponse, Usage,
 };
 use crate::resolver::{AuthData, Endpoint};
 use crate::webc::{EventSourceStream, WebClient, WebResponse};
@@ -1560,7 +1559,9 @@ mod tests {
 
 	/// A signature as this adapter kind would have captured it (connection `None`).
 	fn own(signature: &str) -> ContentPart {
-		ContentPart::ThoughtSignature(ThoughtSignature::new(signature).with_origin(ThoughtOrigin::new(&gemini_3(), None)))
+		ContentPart::ThoughtSignature(
+			ThoughtSignature::new(signature).with_origin(ThoughtOrigin::new(&gemini_3(), None)),
+		)
 	}
 
 	/// Gemini attaches a `thoughtSignature` to a specific part and wants it back on
@@ -1619,10 +1620,7 @@ mod tests {
 	/// A signature on a text part rides that text part back, as it was returned.
 	#[test]
 	fn a_signature_on_a_text_part_rides_the_text_part_back() {
-		let content = MessageContent::from_parts(vec![
-			own("sig-t"),
-			ContentPart::Text("Done.".to_string()),
-		]);
+		let content = MessageContent::from_parts(vec![own("sig-t"), ContentPart::Text("Done.".to_string())]);
 		let chat_req = ChatRequest::new(vec![ChatMessage::user("Hi"), ChatMessage::assistant(content)]);
 
 		let parts = GeminiAdapter::into_gemini_request_parts(&gemini_3(), chat_req, None).expect("request parts");
@@ -1687,7 +1685,10 @@ mod tests {
 			GeminiAdapter::into_gemini_request_parts(&gemini_3(), chat_req, Some("acct")).expect("request parts");
 		assert_eq!(parts.contents[1]["parts"][0]["thoughtSignature"], "sig-a");
 
-		let chat_req = ChatRequest::new(vec![ChatMessage::user("Read."), ChatMessage::assistant(response.content)]);
+		let chat_req = ChatRequest::new(vec![
+			ChatMessage::user("Read."),
+			ChatMessage::assistant(response.content),
+		]);
 		let parts = GeminiAdapter::into_gemini_request_parts(&gemini_3(), chat_req, None).expect("request parts");
 		assert_eq!(
 			parts.contents[1]["parts"][0]["thoughtSignature"],

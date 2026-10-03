@@ -582,9 +582,9 @@ async fn test_yakbak_anthropic_thinking_signature_variants_preserve_block_pairs(
 	let content = extract.stream_end.captured_content.as_ref().ok_or("captured content")?;
 	let parts = content.parts();
 	assert_eq!(parts.len(), 5);
-	assert!(matches!(&parts[0], ContentPart::ThoughtSignature(value) if value == "opaque-start-only"));
+	assert!(matches!(&parts[0], ContentPart::ThoughtSignature(value) if value.signature == "opaque-start-only"));
 	assert!(matches!(&parts[1], ContentPart::ReasoningContent(value) if value == "First block."));
-	assert!(matches!(&parts[2], ContentPart::ThoughtSignature(value) if value == "opaque-prefix-complete"));
+	assert!(matches!(&parts[2], ContentPart::ThoughtSignature(value) if value.signature == "opaque-prefix-complete"));
 	assert!(matches!(&parts[3], ContentPart::ReasoningContent(value) if value == "Second block."));
 	assert!(matches!(&parts[4], ContentPart::ToolCall(_)));
 

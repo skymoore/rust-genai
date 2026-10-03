@@ -1,7 +1,9 @@
 use super::parse_cache_creation_details;
 use crate::adapter::adapters::support::{StreamerCapturedData, StreamerOptions, new_frame_tap};
 use crate::adapter::inter_stream::{InterStreamEnd, InterStreamEvent, InterStreamThoughtBlock};
-use crate::chat::{ChatOptionsSet, PromptTokensDetails, StopReason, ThoughtOrigin, ThoughtSignature, ToolCall, Usage, UsageCost};
+use crate::chat::{
+	ChatOptionsSet, PromptTokensDetails, StopReason, ThoughtOrigin, ThoughtSignature, ToolCall, Usage, UsageCost,
+};
 use crate::webc::{Event, EventSourceStream};
 use crate::{Error, ModelIden, Result};
 use serde_json::{Map, Value};
@@ -317,7 +319,8 @@ impl futures::Stream for AnthropicStreamer {
 									}
 								}
 								InProgressBlock::Thinking(thinking_block) => {
-									if let Some(block) = thinking_block.into_thought_block(&self.options.thought_origin) {
+									if let Some(block) = thinking_block.into_thought_block(&self.options.thought_origin)
+									{
 										self.captured_thought_blocks.push(block);
 									}
 								}
@@ -633,7 +636,12 @@ mod tests {
 		);
 		let options: ChatOptions = capture_all().with_thought_connection("work");
 		let model = ModelIden::new(AdapterKind::Anthropic, "claude-x");
-		let mut events = collect(AnthropicStreamer::new(sse_stream(body).await, model, options_set(&options))).await;
+		let mut events = collect(AnthropicStreamer::new(
+			sse_stream(body).await,
+			model,
+			options_set(&options),
+		))
+		.await;
 		let Some(Ok(InterStreamEvent::End(end))) = events.pop() else {
 			panic!("End must be last: {events:?}");
 		};

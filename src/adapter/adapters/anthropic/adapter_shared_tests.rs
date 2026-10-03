@@ -5,8 +5,8 @@ use crate::ServiceTarget;
 use crate::adapter::adapters::anthropic::ant_reasoning::REASONING_HIGH;
 use crate::adapter::{Adapter, ServiceType};
 use crate::chat::{
-	ChatMessage, ChatOptions, ChatRequest, ContentPart, JsonSpec, MessageContent, ThoughtOrigin, ThoughtSignature, Tool,
-	ToolCall, ToolChoice, ToolResponse,
+	ChatMessage, ChatOptions, ChatRequest, ContentPart, JsonSpec, MessageContent, ThoughtOrigin, ThoughtSignature,
+	Tool, ToolCall, ToolChoice, ToolResponse,
 };
 use crate::resolver::AuthData;
 use crate::webc::WebResponse;
@@ -233,9 +233,11 @@ fn test_assistant_thinking_signature_serializes_before_tool_use() {
 		fn_arguments: json!({"city": "Cairo", "unit": "C"}),
 		thought_signatures: Some(vec!["opaque-signature".to_string()]),
 	};
-	let assistant =
-		ChatMessage::assistant_tool_calls_with_thoughts(vec![tool_call.clone()], vec![own_signature("opaque-signature")])
-			.with_reasoning_content(Some("Cairo is in Africa.".to_string()));
+	let assistant = ChatMessage::assistant_tool_calls_with_thoughts(
+		vec![tool_call.clone()],
+		vec![own_signature("opaque-signature")],
+	)
+	.with_reasoning_content(Some("Cairo is in Africa.".to_string()));
 	let req = ChatRequest::new(vec![
 		assistant,
 		ChatMessage::from(ToolResponse::from_tool_call(&tool_call, "25 C and clear")),

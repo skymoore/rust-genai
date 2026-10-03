@@ -222,10 +222,7 @@ impl futures::Stream for GeminiIxStreamer {
 								}
 								let tagged = crate::chat::ThoughtSignature::new(signature.clone())
 									.with_origin(self.options.thought_origin.clone());
-								self.captured_data
-									.thought_signatures
-									.get_or_insert_with(Vec::new)
-									.push(tagged);
+								self.captured_data.thought_signatures.get_or_insert_with(Vec::new).push(tagged);
 								return Poll::Ready(Some(Ok(InterStreamEvent::ThoughtSignatureChunk(signature))));
 							}
 

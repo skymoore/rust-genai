@@ -1225,11 +1225,7 @@ mod tests {
 	// region:    --- thought-signature provenance
 
 	fn reasoning_items(parts: &OpenAIRespRequestParts) -> Vec<&Value> {
-		parts
-			.input_items
-			.iter()
-			.filter(|item| item["type"] == "reasoning")
-			.collect()
+		parts.input_items.iter().filter(|item| item["type"] == "reasoning").collect()
 	}
 
 	fn tagged(sig: &str, kind: AdapterKind, connection: Option<&str>) -> ContentPart {
@@ -1292,8 +1288,7 @@ mod tests {
 		assert!(sig.readable_by(AdapterKind::OpenAIResp, Some("direct")));
 
 		let chat_req = ChatRequest::new(vec![ChatMessage::user("q"), ChatMessage::assistant(response.content)]);
-		let parts =
-			OpenAIRespAdapter::into_openai_request_parts(&model_iden, chat_req, None, Some("direct")).unwrap();
+		let parts = OpenAIRespAdapter::into_openai_request_parts(&model_iden, chat_req, None, Some("direct")).unwrap();
 		assert_eq!(
 			reasoning_items(&parts),
 			vec![&json!({"type": "reasoning", "encrypted_content": "blob-1", "summary": []})]

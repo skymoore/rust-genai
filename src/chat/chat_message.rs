@@ -93,7 +93,10 @@ impl ChatMessage {
 	}
 
 	/// Builds an assistant message with thought signatures ordered before tool calls.
-	pub fn assistant_tool_calls_with_thoughts(tool_calls: Vec<ToolCall>, thought_signatures: Vec<ThoughtSignature>) -> Self {
+	pub fn assistant_tool_calls_with_thoughts(
+		tool_calls: Vec<ToolCall>,
+		thought_signatures: Vec<ThoughtSignature>,
+	) -> Self {
 		let mut parts: Vec<ContentPart> = thought_signatures.into_iter().map(ContentPart::ThoughtSignature).collect();
 		parts.extend(tool_calls.into_iter().map(ContentPart::ToolCall));
 		ChatMessage::assistant(MessageContent::from_parts(parts))
