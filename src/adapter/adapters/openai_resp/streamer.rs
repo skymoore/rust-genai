@@ -1,7 +1,7 @@
 use super::RespResponse;
 use crate::adapter::adapters::support::{StreamerCapturedData, StreamerOptions, new_frame_tap};
 use crate::adapter::inter_stream::{InterStreamEnd, InterStreamEvent};
-use crate::chat::{ChatOptionsSet, StopReason, ToolCall};
+use crate::chat::{ChatOptionsSet, StopReason, ToolCall, UsageCost};
 use crate::webc::{Event, EventSourceStream};
 use crate::{Error, ModelIden, Result};
 use serde::Deserialize;
@@ -19,6 +19,9 @@ pub struct OpenAIRespStreamer {
 	/// Flag to prevent polling the EventSource after a MessageStop event
 	done: bool,
 	captured_data: StreamerCapturedData,
+	/// End built at `response.completed`/`response.incomplete`, held until the connection closes so a
+	/// trailing gateway cost frame (OpenCode Zen `event: ping` `{"type":"ping","cost":"…"}`) can land in it.
+	pending_end: Option<InterStreamEnd>,
 
 	in_progress_tool_calls: BTreeMap<usize, ToolCall>,
 	custom_tool_call_indexes: BTreeSet<usize>,
@@ -116,6 +119,13 @@ enum RespStreamEvent {
 	#[serde(rename = "error")]
 	Error,
 
+	/// OpenCode Zen appends `{"type":"ping","cost":"0.00123400"}` after the upstream stream.
+	#[serde(rename = "ping")]
+	Ping {
+		#[serde(default)]
+		cost: Option<Value>,
+	},
+
 	#[serde(other)]
 	Unknown,
 }
@@ -129,6 +139,7 @@ impl OpenAIRespStreamer {
 			done: false,
 			options: StreamerOptions::new(model_iden, options_set),
 			captured_data: Default::default(),
+			pending_end: None,
 			in_progress_tool_calls: BTreeMap::new(),
 			custom_tool_call_indexes: BTreeSet::new(),
 		}
@@ -286,7 +297,6 @@ impl futures::Stream for OpenAIRespStreamer {
 						}
 
 						RespStreamEvent::ResponseCompleted { response } => {
-							self.done = true;
 							self.captured_data.stop_reason = Some(response.status.clone());
 
 							if self.options.capture_usage {
@@ -362,7 +372,8 @@ impl futures::Stream for OpenAIRespStreamer {
 								}
 							}
 
-							let inter_stream_end = InterStreamEnd {
+							// Held until the connection closes (or a cost ping arrives), see `pending_end`.
+							self.pending_end = Some(InterStreamEnd {
 								captured_usage: self.captured_data.usage.take(),
 								captured_stop_reason: self.captured_data.stop_reason.take().map(StopReason::from),
 								captured_text_content: self.captured_data.content.take(),
@@ -371,9 +382,8 @@ impl futures::Stream for OpenAIRespStreamer {
 								captured_thought_signatures: self.captured_data.thought_signatures.take(),
 								captured_thought_blocks: None,
 								captured_response_id: Some(response.id),
-							};
-
-							return Poll::Ready(Some(Ok(InterStreamEvent::End(inter_stream_end))));
+							});
+							continue;
 						}
 
 						RespStreamEvent::ResponseFailed { response } => {
@@ -391,12 +401,11 @@ impl futures::Stream for OpenAIRespStreamer {
 						}
 
 						RespStreamEvent::ResponseIncomplete { response } => {
-							self.done = true;
 							self.captured_data.stop_reason = Some(response.status.clone());
 							// For incomplete, we might still want to return what we have?
 							// But for now, let's treat it as a successful end but with whatever we captured.
 							let resp_id = response.id.clone();
-							let inter_stream_end = InterStreamEnd {
+							self.pending_end = Some(InterStreamEnd {
 								captured_usage: response.usage.map(Into::into),
 								captured_stop_reason: self.captured_data.stop_reason.take().map(StopReason::from),
 								captured_text_content: self.captured_data.content.take(),
@@ -405,9 +414,24 @@ impl futures::Stream for OpenAIRespStreamer {
 								captured_thought_signatures: None,
 								captured_thought_blocks: None,
 								captured_response_id: Some(resp_id),
-							};
+							});
+							continue;
+						}
 
-							return Poll::Ready(Some(Ok(InterStreamEvent::End(inter_stream_end))));
+						RespStreamEvent::Ping { cost } => {
+							let cost = cost
+								.filter(|_| self.options.capture_usage)
+								.as_ref()
+								.and_then(UsageCost::provider_reported);
+							if let Some(cost) = cost {
+								if let Some(mut end) = self.pending_end.take() {
+									end.captured_usage.get_or_insert_default().cost = Some(cost);
+									self.done = true;
+									return Poll::Ready(Some(Ok(InterStreamEvent::End(end))));
+								}
+								self.captured_data.usage.get_or_insert_default().cost = Some(cost);
+							}
+							continue;
 						}
 
 						RespStreamEvent::Error => {
@@ -439,6 +463,10 @@ impl futures::Stream for OpenAIRespStreamer {
 					})));
 				}
 				None => {
+					if let Some(end) = self.pending_end.take() {
+						self.done = true;
+						return Poll::Ready(Some(Ok(InterStreamEvent::End(end))));
+					}
 					if !self.done {
 						self.done = true;
 						let inter_stream_end = InterStreamEnd {
@@ -467,6 +495,49 @@ mod tests {
 	type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>; // For tests.
 
 	use super::*;
+	use crate::adapter::AdapterKind;
+	use crate::adapter::adapters::support::test_support::{capture_all, chunks_text, collect, options_set, sse_stream};
+	use crate::chat::UsageCostSource;
+
+	#[tokio::test]
+	async fn test_zen_responses_stream_cost_ping_after_completed_lands_in_usage() {
+		let body = concat!(
+			"event: response.created\n",
+			"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\",\"model\":\"gpt\",\"output\":[]}}\n\n",
+			"event: response.output_text.delta\n",
+			"data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hello\"}\n\n",
+			"event: response.completed\n",
+			"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"model\":\"gpt\",\"output\":[],",
+			"\"usage\":{\"input_tokens\":12,\"output_tokens\":3,\"total_tokens\":15}}}\n\n",
+			"event: ping\n",
+			"data: {\"type\":\"ping\",\"cost\":\"0.00123400\"}\n\n",
+		);
+		let options = capture_all();
+		let model = ModelIden::new(AdapterKind::OpenAIResp, "m");
+		let events = collect(OpenAIRespStreamer::new(
+			sse_stream(body).await,
+			model,
+			options_set(&options),
+		))
+		.await;
+
+		let Some(Ok(InterStreamEvent::End(end))) = events.last() else {
+			panic!("End must be last: {events:?}");
+		};
+		let usage = end.captured_usage.as_ref().expect("usage");
+		assert_eq!(usage.prompt_tokens, Some(12));
+		assert_eq!(usage.completion_tokens, Some(3));
+		let cost = usage.cost.as_ref().expect("cost");
+		assert_eq!(cost.amount, 0.001234);
+		assert_eq!(cost.source, UsageCostSource::ProviderReported);
+		assert_eq!(end.captured_response_id.as_deref(), Some("resp_1"));
+		assert_eq!(chunks_text(&events), "Hello");
+		let ends = events
+			.iter()
+			.filter(|event| matches!(event, Ok(InterStreamEvent::End(_))))
+			.count();
+		assert_eq!(ends, 1);
+	}
 
 	#[test]
 	fn recognizes_custom_tool_input_delta_events() -> Result<()> {
