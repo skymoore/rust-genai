@@ -32,6 +32,7 @@ use genai::ModelIden;
 use genai::adapter::AdapterKind;
 use genai::chat::{
 	ChatMessage, ChatOptions, ChatRequest, ChatStreamEvent, ContentPart, MessageContent, ReasoningEffort,
+	ThoughtSignature,
 };
 use genai::resolver::{AuthData, AuthResolver};
 
@@ -103,7 +104,7 @@ struct TurnUsage {
 	reasoning: i32,
 }
 
-fn print_turn(n: usize, text: &str, sigs: &[String], u: &TurnUsage) {
+fn print_turn(n: usize, text: &str, sigs: &[ThoughtSignature], u: &TurnUsage) {
 	println!("\n=== turn {n} ===");
 	println!(
 		"  usage: prompt={} cached={} completion={} reasoning_tokens={}",
@@ -119,7 +120,7 @@ async fn run_turn(
 	model: &str,
 	req: ChatRequest,
 	options: &ChatOptions,
-) -> Result<(String, Vec<String>, TurnUsage), Box<dyn std::error::Error>> {
+) -> Result<(String, Vec<ThoughtSignature>, TurnUsage), Box<dyn std::error::Error>> {
 	let stream_res = client.exec_chat_stream(model, req, Some(options)).await?;
 	let mut stream = stream_res.stream;
 	let mut text = String::new();
@@ -135,9 +136,11 @@ async fn run_turn(
 		}
 	}
 	let end = end_opt.ok_or("stream ended without End event")?;
-	let sigs: Vec<String> = end
-		.captured_thought_signatures()
-		.map(|v| v.into_iter().map(String::from).collect())
+	// Keep the typed parts: a signature carries its issuer and is only replayed to it.
+	let sigs: Vec<ThoughtSignature> = end
+		.captured_content
+		.as_ref()
+		.map(|c| c.thought_signature_parts().into_iter().cloned().collect())
 		.unwrap_or_default();
 	let usage = end.captured_usage.as_ref();
 	let prompt = usage.and_then(|u| u.prompt_tokens).unwrap_or(0);

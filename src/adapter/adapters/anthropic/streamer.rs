@@ -306,7 +306,8 @@ impl futures::Stream for AnthropicStreamer {
 									self.capture_tool_call(id, name, input, false);
 								}
 								InProgressBlock::Thinking(thinking_block) => {
-									if let Some(block) = thinking_block.into_thought_block(&self.options.thought_origin) {
+									if let Some(block) = thinking_block.into_thought_block(&self.options.thought_origin)
+									{
 										self.captured_thought_blocks.push(block);
 									}
 								}
@@ -713,7 +714,12 @@ mod tests {
 		);
 		let options: ChatOptions = capture_all().with_thought_connection("work");
 		let model = ModelIden::new(AdapterKind::Anthropic, "claude-x");
-		let mut events = collect(AnthropicStreamer::new(sse_stream(body).await, model, options_set(&options))).await;
+		let mut events = collect(AnthropicStreamer::new(
+			sse_stream(body).await,
+			model,
+			options_set(&options),
+		))
+		.await;
 		let Some(Ok(InterStreamEvent::End(end))) = events.pop() else {
 			panic!("End must be last: {events:?}");
 		};

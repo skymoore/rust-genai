@@ -65,7 +65,7 @@ async fn test_yakbak_bedrock_reasoning_tool_stream_round_trip() -> TestResult<()
 	assert!(first.reasoning_content.is_none());
 
 	let parts = first.stream_end.captured_content.as_ref().ok_or("captured content")?.parts();
-	assert!(matches!(&parts[0], ContentPart::ThoughtSignature(sig) if *sig == blob));
+	assert!(matches!(&parts[0], ContentPart::ThoughtSignature(sig) if sig.signature == blob));
 	assert!(!parts.iter().any(|part| matches!(part, ContentPart::ReasoningContent(_))));
 	assert!(matches!(parts.last(), Some(ContentPart::ToolCall(_))));
 
@@ -165,7 +165,7 @@ async fn test_yakbak_bedrock_claude_thinking_tool_stream_round_trip() -> TestRes
 	let signature = first.thought_signature_chunks[0].clone();
 
 	let parts = first.stream_end.captured_content.as_ref().ok_or("captured content")?.parts();
-	assert!(matches!(&parts[0], ContentPart::ThoughtSignature(sig) if *sig == signature));
+	assert!(matches!(&parts[0], ContentPart::ThoughtSignature(sig) if sig.signature == signature));
 	assert!(matches!(&parts[1], ContentPart::ReasoningContent(text) if *text == reasoning));
 	assert!(matches!(parts.last(), Some(ContentPart::ToolCall(_))));
 
@@ -194,7 +194,7 @@ async fn test_yakbak_bedrock_claude_thinking_tool_stream_round_trip() -> TestRes
 		.find(|message| message.role == ChatRole::Assistant)
 		.ok_or("assistant tool-use message")?;
 	let assistant_parts = assistant.content.parts();
-	assert!(matches!(&assistant_parts[0], ContentPart::ThoughtSignature(sig) if *sig == signature));
+	assert!(matches!(&assistant_parts[0], ContentPart::ThoughtSignature(sig) if sig.signature == signature));
 	assert!(matches!(&assistant_parts[1], ContentPart::ReasoningContent(text) if *text == reasoning));
 
 	// -- Round 2: the answer
@@ -231,7 +231,7 @@ async fn test_yakbak_bedrock_claude_adaptive_tool_stream_round_trip() -> TestRes
 	let signature = first.thought_signature_chunks[0].clone();
 
 	let parts = first.stream_end.captured_content.as_ref().ok_or("captured content")?.parts();
-	assert!(matches!(&parts[0], ContentPart::ThoughtSignature(sig) if *sig == signature));
+	assert!(matches!(&parts[0], ContentPart::ThoughtSignature(sig) if sig.signature == signature));
 	assert!(matches!(&parts[1], ContentPart::ReasoningContent(text) if *text == reasoning));
 	assert!(matches!(parts.last(), Some(ContentPart::ToolCall(_))));
 
