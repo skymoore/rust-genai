@@ -750,6 +750,13 @@ mod tests {
 		}
 	}
 
+	/// A signature as this adapter kind would have captured it (connection `None`).
+	fn own_signature(signature: &str) -> ContentPart {
+		ContentPart::ThoughtSignature(
+			ThoughtSignature::new(signature).with_origin(ThoughtOrigin::new(&ModelIden::new(AdapterKind::BedrockApi, "m"), None)),
+		)
+	}
+
 	#[test]
 	fn publisher_is_read_with_and_without_a_profile_prefix() {
 		for (id, expected) in [
@@ -900,9 +907,9 @@ mod tests {
 	fn assistant_turn_replays_signed_and_redacted_reasoning_before_tool_use() -> Result<()> {
 		// -- Setup & Fixtures
 		let assistant = ChatMessage::assistant(MessageContent::from_parts(vec![
-			ContentPart::ThoughtSignature("sig-1".to_string()),
+			own_signature("sig-1"),
 			ContentPart::ReasoningContent("thinking".to_string()),
-			ContentPart::ThoughtSignature("blob".to_string()),
+			own_signature("blob"),
 			ContentPart::from_text("Checking."),
 			ContentPart::ToolCall(tool_call()),
 		]));
@@ -924,34 +931,26 @@ mod tests {
 		Ok(())
 	}
 
+	/// `ToolCall.thought_signatures` alone is never replayed, and neither is a signature another
+	/// provider or connection issued (or an untagged one): the reasoning it signs goes with it.
 	#[test]
-	fn assistant_turn_falls_back_to_tool_call_signatures() -> Result<()> {
+	fn assistant_turn_replays_only_own_signatures() -> Result<()> {
 		// -- Setup & Fixtures
 		let mut call = tool_call();
 		call.thought_signatures = Some(vec!["blob".to_string()]);
-		let assistant = ChatMessage::assistant(MessageContent::from_parts(vec![ContentPart::ToolCall(call)]));
-		let chat_req = ChatRequest::new(vec![ChatMessage::user("hi"), assistant]);
-
-		// -- Exec
-		let payload = payload_for("global.openai.gpt-5.6-terra", chat_req, &ChatOptions::default())?;
-
-		// -- Check
-		assert_eq!(
-			payload["messages"][1]["content"][0],
-			json!({ "reasoningContent": { "redactedContent": "blob" } })
-		);
-		Ok(())
-	}
-
-	#[test]
-	fn assistant_turn_skips_tool_call_signatures_for_non_openai() -> Result<()> {
-		// -- Setup & Fixtures
-		let mut call = tool_call();
-		call.thought_signatures = Some(vec!["sig-1".to_string()]);
-		let assistant = ChatMessage::assistant(MessageContent::from_parts(vec![ContentPart::ToolCall(call)]));
+		let foreign = ContentPart::ThoughtSignature(ThoughtSignature::new("sig-x").with_origin(ThoughtOrigin::new(
+			&ModelIden::new(AdapterKind::Anthropic, "m"),
+			None,
+		)));
+		let assistant = ChatMessage::assistant(MessageContent::from_parts(vec![
+			foreign,
+			ContentPart::ReasoningContent("thinking".to_string()),
+			ContentPart::ThoughtSignature(ThoughtSignature::new("legacy")),
+			ContentPart::ToolCall(call),
+		]));
 		let chat_req = || ChatRequest::new(vec![ChatMessage::user("hi"), assistant.clone()]);
 
-		for model in ["us.anthropic.claude-haiku-4-5", "us.amazon.nova-2-lite-v1:0"] {
+		for model in ["global.openai.gpt-5.6-terra", "us.anthropic.claude-haiku-4-5"] {
 			// -- Exec
 			let payload = payload_for(model, chat_req(), &ChatOptions::default())?;
 
@@ -1056,7 +1055,7 @@ mod tests {
 		};
 
 		// -- Exec
-		let res = parse_converse_response(ModelIden::new(AdapterKind::BedrockApi, "m"), web_response)?;
+		let res = parse_converse_response(ModelIden::new(AdapterKind::BedrockApi, "m"), web_response, None)?;
 
 		// -- Check
 		assert_eq!(res.reasoning_content.as_deref(), Some("thinking"));
@@ -1065,7 +1064,7 @@ mod tests {
 			.parts()
 			.iter()
 			.map(|part| match part {
-				ContentPart::ThoughtSignature(sig) => format!("sig:{sig}"),
+				ContentPart::ThoughtSignature(sig) => format!("sig:{}", sig.signature),
 				ContentPart::ReasoningContent(text) => format!("text:{text}"),
 				ContentPart::ToolCall(call) => format!("call:{:?}", call.thought_signatures),
 				_ => "other".to_string(),

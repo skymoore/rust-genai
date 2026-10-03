@@ -570,7 +570,7 @@ fn test_openai_resp_into_openai_request_parts_does_not_duplicate_mirrored_though
 		endpoint: OpenAIRespAdapter::default_endpoint(AdapterKind::OpenAIResp),
 	};
 	let assistant_content = MessageContent::from_parts(vec![
-		ContentPart::ThoughtSignature("enc_sig_1".to_string()),
+		tagged("enc_sig_1", AdapterKind::OpenAIResp, None),
 		ContentPart::ToolCall(ToolCall {
 			call_id: "call_1".to_string(),
 			fn_name: "get_weather".to_string(),

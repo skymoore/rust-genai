@@ -599,7 +599,7 @@ mod tests {
 	use crate::adapter::AdapterKind;
 	use crate::adapter::adapters::support::test_support::{capture_all, chunks_text, collect, options_set, sse_stream};
 	use crate::adapter::inter_stream::{InterStreamEvent, InterStreamThoughtBlock};
-	use crate::chat::{Usage, UsageCostSource};
+	use crate::chat::{ChatOptions, ThoughtOrigin, Usage, UsageCostSource};
 	use serde_json::json;
 
 	const ANTHROPIC_STREAM: &str = concat!(
@@ -678,10 +678,56 @@ mod tests {
 		for delta in deltas {
 			block.append_signature_delta(delta);
 		}
-		match block.into_thought_block()? {
-			InterStreamThoughtBlock::Signed { signature, .. } => Some(signature),
+		let origin = ThoughtOrigin::new(&ModelIden::new(AdapterKind::Anthropic, "m"), None);
+		match block.into_thought_block(&origin)? {
+			InterStreamThoughtBlock::Signed { signature, .. } => Some(signature.signature),
 			InterStreamThoughtBlock::Custom(_) => None,
 		}
+	}
+
+	/// A streamed thinking block lands in `StreamEnd.captured_content` as a signature tagged
+	/// with this adapter kind and the connection label the request was made with.
+	#[tokio::test]
+	async fn captured_thinking_signature_carries_origin_and_connection() {
+		let body = concat!(
+			"event: message_start\n",
+			"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+			"event: content_block_start\n",
+			"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n",
+			"event: content_block_delta\n",
+			"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Plan.\"}}\n\n",
+			"event: content_block_delta\n",
+			"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig-1\"}}\n\n",
+			"event: content_block_stop\n",
+			"data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+			"event: content_block_start\n",
+			"data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+			"event: content_block_delta\n",
+			"data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n",
+			"event: content_block_stop\n",
+			"data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+			"event: message_delta\n",
+			"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",
+			"event: message_stop\n",
+			"data: {\"type\":\"message_stop\"}\n\n",
+		);
+		let options: ChatOptions = capture_all().with_thought_connection("work");
+		let model = ModelIden::new(AdapterKind::Anthropic, "claude-x");
+		let mut events = collect(AnthropicStreamer::new(sse_stream(body).await, model, options_set(&options))).await;
+		let Some(Ok(InterStreamEvent::End(end))) = events.pop() else {
+			panic!("End must be last: {events:?}");
+		};
+		let stream_end = crate::chat::StreamEnd::from(end);
+		let content = stream_end.captured_content.expect("captured content");
+		let sig = content.thought_signature_parts()[0];
+		assert_eq!(sig.signature, "sig-1");
+		let origin = sig.origin.as_ref().expect("origin");
+		assert_eq!(origin.adapter_kind, AdapterKind::Anthropic);
+		assert_eq!(origin.model_name, crate::ModelName::from("claude-x"));
+		assert_eq!(origin.connection.as_deref(), Some("work"));
+		assert!(sig.readable_by(AdapterKind::Anthropic, Some("work")));
+		assert!(!sig.readable_by(AdapterKind::Anthropic, None));
+		assert_eq!(content.reasoning_contents(), vec!["Plan."]);
 	}
 
 	#[test]

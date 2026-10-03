@@ -819,7 +819,7 @@ mod tests {
 				InterStreamThoughtBlock::Signed {
 					reasoning_content,
 					signature,
-				} => Some((reasoning_content.as_deref(), signature.as_str())),
+				} => Some((reasoning_content.as_deref(), signature.signature.as_str())),
 				InterStreamThoughtBlock::Custom(_) => None,
 			})
 			.collect();
