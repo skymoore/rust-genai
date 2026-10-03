@@ -133,12 +133,55 @@ fn test_into_usage_preserves_provider_reported_cost() -> Result<()> {
 	let round_trip: crate::chat::Usage = serde_json::from_value(serde_json::to_value(&usage)?)?;
 	assert_eq!(round_trip, usage);
 
-	let usage = OpenAIAdapter::into_usage(AdapterKind::OpenAI, json!({"prompt_tokens": 10, "completion_tokens": 5}));
+	let usage = OpenAIAdapter::into_usage(
+		AdapterKind::OpenAI,
+		json!({"prompt_tokens": 10, "completion_tokens": 5}),
+	);
 	assert!(usage.cost.is_none());
 	// Negative/non-finite cost is dropped without breaking token parsing.
 	let usage = OpenAIAdapter::into_usage(AdapterKind::OpenAI, json!({"prompt_tokens": 10, "cost": -1.0}));
 	assert!(usage.cost.is_none());
 	assert_eq!(usage.prompt_tokens, Some(10));
+
+	Ok(())
+}
+
+#[test]
+fn test_into_usage_maps_openrouter_usage_object() -> Result<()> {
+	// OpenRouter's exact usage object (always returned): cache read/write details, reasoning tokens, cost.
+	let usage = OpenAIAdapter::into_usage(
+		AdapterKind::OpenRouter,
+		json!({
+			"prompt_tokens": 22040, "completion_tokens": 391, "total_tokens": 22431,
+			"prompt_tokens_details": {"cached_tokens": 11041, "cache_write_tokens": 0},
+			"completion_tokens_details": {"reasoning_tokens": 120},
+			"cost": 0.0123, "cost_details": {"upstream_inference_cost": null}
+		}),
+	);
+	assert_eq!(usage.prompt_tokens, Some(22040));
+	assert_eq!(usage.completion_tokens, Some(391));
+	assert_eq!(usage.total_tokens, Some(22431));
+	let prompt_details = usage.prompt_tokens_details.as_ref().ok_or("prompt details missing")?;
+	assert_eq!(prompt_details.cached_tokens, Some(11041));
+	// `cache_write_tokens: 0` is normalized to None like every other zero counter.
+	assert_eq!(prompt_details.cache_creation_tokens, None);
+	let completion_details = usage.completion_tokens_details.as_ref().ok_or("completion details missing")?;
+	assert_eq!(completion_details.reasoning_tokens, Some(120));
+	assert_eq!(usage.cost.as_ref().map(|c| c.amount), Some(0.0123));
+
+	// A non-zero cache write lands in `cache_creation_tokens` (the alias target).
+	let usage = OpenAIAdapter::into_usage(
+		AdapterKind::OpenRouter,
+		json!({"prompt_tokens": 10, "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 7}}),
+	);
+	assert_eq!(
+		usage.prompt_tokens_details.as_ref().and_then(|d| d.cache_creation_tokens),
+		Some(7)
+	);
+
+	// OpenCode Zen's decimal-string cost parses too.
+	let usage = OpenAIAdapter::into_usage(AdapterKind::OpenAI, json!({"prompt_tokens": 10, "cost": "0.00123400"}));
+	assert_eq!(usage.cost.as_ref().map(|c| c.amount), Some(0.001234));
 
 	Ok(())
 }

@@ -337,6 +337,33 @@ mod tests {
 		Ok(())
 	}
 
+	/// OpenRouter 402/429 bodies: the surfaced text carries code, message and the metadata reason,
+	/// and `Retry-After` stays reachable through `headers()`.
+	#[test]
+	fn test_openrouter_credit_error_surfaces_code_message_reason_and_retry_after() {
+		let body = r#"{"error":{"code":402,"message":"Insufficient credits","metadata":{"reason":"in_flight_budget_exhausted","limit_source":"openrouter_credits","remedy_hint":"Add credits"}}}"#;
+		let mut headers = HeaderMap::new();
+		headers.insert(RETRY_AFTER, HeaderValue::from_static("30"));
+		let error = Error::WebModelCall {
+			model_iden: ModelIden::new(AdapterKind::OpenRouter, "anthropic/claude-opus-5.5"),
+			webc_error: webc::Error::ResponseFailedStatus {
+				status: StatusCode::PAYMENT_REQUIRED,
+				body: body.to_string(),
+				headers: Box::new(headers),
+			},
+		};
+
+		let text = error.to_string();
+		for needle in ["402", "Insufficient credits", "in_flight_budget_exhausted"] {
+			assert!(text.contains(needle), "missing `{needle}` in: {text}");
+		}
+		assert_eq!(error.status(), Some(StatusCode::PAYMENT_REQUIRED));
+		assert_eq!(
+			error.headers().and_then(|headers| headers.get(RETRY_AFTER)),
+			Some(&HeaderValue::from_static("30"))
+		);
+	}
+
 	#[test]
 	fn test_error_headers_from_http_error() -> Result<()> {
 		let mut headers = HeaderMap::new();
