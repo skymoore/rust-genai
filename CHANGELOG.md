@@ -11,6 +11,8 @@
   - This eliminates internal `.expect(...)` panics during HTTP client initialization, aligning with genai's zero-panic strategy. (PR #292)
 - `!` API CHANGE: `ReasoningEffort::None` is renamed to `ReasoningEffort::Zero`, avoiding confusion with `Option::None`. The canonical keyword is now `"zero"` (was `"none"`), `as_keyword()` and `Display` emit `"zero"`, and `from_keyword()` still accepts `"none"` as a backward-compatible alias.
 - `!` API CHANGE: `JsonSpec::schema_with_additional_properties_false` is removed. Provider adapters now sanitize schemas as required by their target API. `JsonSchemaDialect` and `sanitize_json_schema(...)` are available for explicit schema sanitization.
+- `!` API CHANGE: `ContentPart::ThoughtSignature` now carries a `ThoughtSignature { signature, origin: Option<ThoughtOrigin> }` instead of a bare `String`; `ThoughtOrigin { adapter_kind, model_name, connection }` records who issued it. Deserialises from the object **and** the legacy bare string (`origin: None`), so stored messages still load. `MessageContent::thought_signatures()` / `ContentPart::as_thought_signature()` keep returning `&str`; new `thought_signature_parts()` / `as_thought_signature_part()` expose the typed part. `ChatMessage::assistant_tool_calls_with_thoughts` takes `Vec<ThoughtSignature>`. (theuth design 90)
+- `!` API CHANGE: `ModelName` serialises as a plain JSON string (the derived form emitted `{"Shared": ..}` and could not be read back) and deserialises from owned strings as well as borrowed ones.
 
 ### API Minor Changes (New Properties / Variants)
 
@@ -18,11 +20,15 @@
 - `!` API CHANGE: `Tool` adds the public `custom_format: Option<Value>` field for provider-native freeform custom-tool formats. Downstream `Tool` struct literals must add `custom_format: None`, or preferably migrate to `Tool::new(...)` and builder methods. `Tool::with_custom_format(...)` is the new builder API.
 - `!` API CHANGE: `ChatOptions` adds the public `raw_frame_sink: Option<Arc<dyn ChatFrameSink>>` field for observing raw stream frames across providers. Downstream `ChatOptions` struct literals must add `raw_frame_sink: None` or use `..Default::default()`.
 - `+` Add `ClientBuilder::append_provider_config`, `ClientConfig::append_provider_config`, and `ClientConfig::provider_config` to configure per-adapter endpoint and auth targets declaratively without custom resolver closures. (PR #289)
+- `+` Add `ChatOptions::with_thought_connection(label)` / `ChatOptionsSet::thought_connection()`: the caller's label for the account or gateway a request goes to. Signatures captured from the response are tagged with it and later replayed only to a request with the same label.
 
 ### Behavior Refinement / Changes
 
 - Chat:
   - `-` Preserve each tool call's thought signatures when converting `Vec<ToolCall>` into an assistant message, avoiding duplicate OpenAI Responses reasoning items and incorrect Gemini signature pairing. ([#306](https://github.com/jeremychone/rust-genai/issues/306)) (PR #307)
+  - `!` Thought signatures are replayed only to their issuer: every capture path (Anthropic, OpenAI Responses stream + non-stream, Gemini, Gemini Interactions) stamps `ThoughtOrigin { adapter_kind, model_name, connection }`, and every request builder emits a signature iff `ThoughtSignature::readable_by(this adapter kind, options.thought_connection())`. Anything else — another provider, another connection, or an untagged legacy signature — is dropped together with the reasoning text it signs (nothing of a dropped block is sent as text; counts at `debug`). Fixes Anthropic `Invalid signature in thinking block` / OpenAI `invalid_encrypted_content` after switching a session between providers. `ToolCall.thought_signatures` stays as a field but is no longer a replay source on any adapter. `ContentPart::Custom` parts that carry a `model_iden` are forwarded only by the adapter kind that produced them (Anthropic, OpenAI-compatible `reasoning_details`); untagged ones are the caller's and are forwarded as before.
+  - `^` Anthropic pairs a `ThoughtSignature` with the `ReasoningContent` that follows it positionally (not by count); an all-Anthropic same-connection message serialises byte-identically to before.
+  - `+` OpenAI Responses non-streaming responses now capture `reasoning.encrypted_content` as a `ThoughtSignature` part, as the streamer already did.
 - Anthropic:
   - `Zero` now positively disables reasoning, whereas it previously triggered adaptive thinking.
   - Sonnet 5 sends `thinking: {"type": "disabled"}`, because thinking is on by default.
