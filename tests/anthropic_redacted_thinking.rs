@@ -189,7 +189,7 @@ async fn a_streamed_redacted_thinking_block_is_kept_in_its_place() {
 		.expect("captured content")
 		.into_iter()
 		.map(|part| match part {
-			ContentPart::ThoughtSignature(signature) => json!({ "signature": signature }),
+			ContentPart::ThoughtSignature(signature) => json!({ "signature": signature.signature }),
 			ContentPart::ReasoningContent(reasoning) => json!({ "reasoning": reasoning }),
 			ContentPart::Custom(custom) => json!({ "custom": custom.data }),
 			ContentPart::ToolCall(call) => json!({ "tool_call": call.call_id }),

@@ -1,4 +1,4 @@
-use crate::chat::{ContentPart, ToolCall};
+use crate::chat::{ContentPart, ThoughtSignature, ToolCall};
 use crate::{Error, Result};
 use serde_json::Value;
 use value_ext::JsonValueExt;
@@ -62,7 +62,7 @@ impl ContentPart {
 				if let Ok(encrypted) = item_value.x_remove::<String>("encrypted_content")
 					&& !encrypted.is_empty()
 				{
-					parts.push(ContentPart::ThoughtSignature(encrypted));
+					parts.push(ContentPart::ThoughtSignature(ThoughtSignature::new(encrypted)));
 				}
 			}
 		}

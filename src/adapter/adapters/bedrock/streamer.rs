@@ -18,7 +18,7 @@
 use crate::adapter::adapters::bedrock::converse::parse_usage;
 use crate::adapter::adapters::support::{StreamerCapturedData, StreamerOptions, new_frame_tap};
 use crate::adapter::inter_stream::{InterStreamEnd, InterStreamEvent, InterStreamThoughtBlock};
-use crate::chat::{ChatOptionsSet, StopReason, ToolCall};
+use crate::chat::{ChatOptionsSet, StopReason, ThoughtOrigin, ThoughtSignature, ToolCall};
 use crate::webc::FrameTap;
 use crate::{Error, ModelIden, Result};
 use bytes::{Buf, BytesMut};
@@ -67,17 +67,18 @@ struct ReasoningAccumulator {
 }
 
 impl ReasoningAccumulator {
-	/// A signed or redacted block, or `None` for unsigned reasoning (it can't be replayed).
-	fn into_thought_block(self) -> Option<InterStreamThoughtBlock> {
+	/// A signed or redacted block tagged with `origin`, or `None` for unsigned reasoning (it can't
+	/// be replayed).
+	fn into_thought_block(self, origin: &ThoughtOrigin) -> Option<InterStreamThoughtBlock> {
 		if !self.redacted.is_empty() {
 			Some(InterStreamThoughtBlock::Signed {
 				reasoning_content: None,
-				signature: self.redacted,
+				signature: ThoughtSignature::new(self.redacted).with_origin(origin.clone()),
 			})
 		} else if !self.signature.is_empty() {
 			Some(InterStreamThoughtBlock::Signed {
 				reasoning_content: Some(self.text),
-				signature: self.signature,
+				signature: ThoughtSignature::new(self.signature).with_origin(origin.clone()),
 			})
 		} else {
 			None
@@ -357,11 +358,8 @@ impl BedrockStreamer {
 	}
 
 	fn flush_reasoning(&mut self) {
-		if let Some(block) = self
-			.in_progress_reasoning
-			.take()
-			.and_then(ReasoningAccumulator::into_thought_block)
-		{
+		let origin = &self.options.thought_origin;
+		if let Some(block) = self.in_progress_reasoning.take().and_then(|acc| acc.into_thought_block(origin)) {
 			self.captured_thought_blocks.push(block);
 		}
 	}

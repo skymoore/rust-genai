@@ -112,9 +112,9 @@ impl Adapter for BedrockApiAdapter {
 	fn to_chat_response(
 		model_iden: ModelIden,
 		web_response: WebResponse,
-		_options_set: ChatOptionsSet<'_, '_>,
+		options_set: ChatOptionsSet<'_, '_>,
 	) -> Result<ChatResponse> {
-		parse_converse_response(model_iden, web_response)
+		parse_converse_response(model_iden, web_response, options_set.thought_connection())
 	}
 
 	fn to_chat_stream(

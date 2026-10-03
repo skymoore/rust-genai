@@ -991,7 +991,7 @@ fn test_gemini_server_tool_parts_are_replayed_verbatim_in_the_model_turn() {
 	]));
 	let chat_req = ChatRequest::from_user("Build the deck").append_message(assistant);
 
-	let req = GeminiAdapter::into_gemini_request_parts(&model_iden, chat_req).unwrap();
+	let req = GeminiAdapter::into_gemini_request_parts(&model_iden, chat_req, None).unwrap();
 	let model_parts = req.contents[1]["parts"].as_array().unwrap();
 
 	assert_eq!(model_parts.len(), 4);
@@ -1021,7 +1021,7 @@ fn test_gemini_does_not_replay_another_providers_custom_parts() {
 		ContentPart::Text("hi".into()),
 	]));
 	let chat_req = ChatRequest::from_user("x").append_message(assistant);
-	let req = GeminiAdapter::into_gemini_request_parts(&model_iden, chat_req).unwrap();
+	let req = GeminiAdapter::into_gemini_request_parts(&model_iden, chat_req, None).unwrap();
 	let model_parts = req.contents[1]["parts"].as_array().unwrap();
 	assert_eq!(model_parts.len(), 1);
 	assert_eq!(model_parts[0]["text"], "hi");
