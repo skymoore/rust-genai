@@ -1,22 +1,32 @@
 use std::ops::Deref;
 use std::sync::Arc;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Store a model name with or without namespace
 /// e.g. `gemini-3-flash-preview` or `gemini::gemini-3-flash-preview`
-#[derive(Clone, Debug, Serialize, Hash, Eq, PartialEq)]
+///
+/// Serde: serialized as a plain JSON string; the legacy derived form (`{"Shared": ..}`)
+/// still deserializes.
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct ModelName(Inner);
 
-#[derive(Clone, Debug, Serialize, Hash, Eq, PartialEq)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
 enum Inner {
 	Static(&'static str),
 	Shared(Arc<str>),
 }
 
+impl Serialize for ModelName {
+	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		serializer.serialize_str(self.as_str())
+	}
+}
+
 impl<'de> Deserialize<'de> for ModelName {
-	/// Accepts what `Serialize` produces (`{"Shared": "name"}` / `{"Static": "name"}`),
-	/// and also a plain string (`"name"`), so a serialized `ModelName` round-trips.
+	/// Accepts a plain string (`"name"`, what `Serialize` produces) and the legacy tagged form
+	/// (`{"Shared": "name"}` / `{"Static": "name"}`). Owned, not `&str`, so it also loads from a
+	/// `serde_json::Value` or a reader.
 	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
 	where
 		D: Deserializer<'de>,

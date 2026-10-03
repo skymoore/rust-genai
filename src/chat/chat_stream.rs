@@ -495,7 +495,10 @@ mod tests {
 	#[test]
 	fn stream_end_keeps_a_signature_the_call_already_carries() {
 		let inter_end = InterStreamEnd {
-			captured_thought_signatures: Some(vec!["sig-t".to_string(), "sig-a".to_string()]),
+			captured_thought_signatures: Some(vec![
+				crate::chat::ThoughtSignature::new("sig-t"),
+				crate::chat::ThoughtSignature::new("sig-a"),
+			]),
 			captured_tool_calls: Some(vec![ToolCall {
 				call_id: "call-1".to_string(),
 				fn_name: "lookup".to_string(),

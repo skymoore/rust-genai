@@ -2,7 +2,7 @@ use super::GeminiIxAdapter;
 use crate::adapter::{Adapter, AdapterKind, ServiceType, WebRequestData};
 use crate::chat::{
 	ChatMessage, ChatOptions, ChatOptionsSet, ChatRequest, ChatResponseFormat, ChatRole, ContentPart, JsonSpec,
-	MessageContent, ReasoningEffort, Tool, ToolCall, ToolChoice, ToolResponse,
+	MessageContent, ReasoningEffort, ThoughtOrigin, ThoughtSignature, Tool, ToolCall, ToolChoice, ToolResponse,
 };
 use crate::resolver::{AuthData, Endpoint};
 use crate::webc::WebResponse;
@@ -12,6 +12,14 @@ use serde_json::{Value, json};
 type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
 
 const MODEL: &str = "gemini-3.5-flash";
+
+/// A signature as this adapter kind would have captured it (connection `None`).
+fn own_signature(signature: &str) -> ContentPart {
+	ContentPart::ThoughtSignature(
+		ThoughtSignature::new(signature)
+			.with_origin(ThoughtOrigin::new(&ModelIden::new(AdapterKind::GeminiIx, MODEL), None)),
+	)
+}
 
 // region:    --- Request — base payload
 
@@ -142,7 +150,7 @@ fn test_gemini_ix_tool_roundtrip_builds_ordered_steps() -> Result<()> {
 	let assistant = ChatMessage {
 		role: ChatRole::Assistant,
 		content: MessageContent::from_parts(vec![
-			ContentPart::ThoughtSignature("sig-abc".to_string()),
+			own_signature("sig-abc"),
 			ContentPart::ToolCall(ToolCall {
 				call_id: "call_1".to_string(),
 				fn_name: "get_weather".to_string(),
@@ -185,45 +193,50 @@ fn test_gemini_ix_tool_roundtrip_builds_ordered_steps() -> Result<()> {
 	Ok(())
 }
 
-/// Verified against the live API: the provider rejects a replayed `function_call` that is not
-/// preceded by a `thought` step in its own turn. `into_tool_calls()` drops the standalone
-/// `ThoughtSignature` parts, so the signature has to survive on the `ToolCall` itself.
+/// `ToolCall.thought_signatures` is an informational mirror, not a replay source: a turn rebuilt
+/// from its tool calls alone gets the documented skip sentinel, never the mirrored string. The
+/// same goes for a signature another adapter or connection issued, or an untagged legacy one.
 #[test]
-fn test_gemini_ix_tool_call_signature_emits_its_thought_step() -> Result<()> {
+fn test_gemini_ix_foreign_or_mirrored_signature_is_not_replayed() -> Result<()> {
 	// -- Setup & Fixtures
-	let assistant = ChatMessage {
-		role: ChatRole::Assistant,
-		content: MessageContent::from_parts(vec![ContentPart::ToolCall(ToolCall {
-			call_id: "call_1".to_string(),
-			fn_name: "get_weather".to_string(),
-			fn_arguments: json!({"city": "Chennai"}),
-			thought_signatures: Some(vec!["sig-from-tool-call".to_string()]),
-		})]),
-		options: None,
-	};
-	let chat_req = ChatRequest::new(vec![ChatMessage::user("Weather?"), assistant]);
+	let foreign = ContentPart::ThoughtSignature(
+		ThoughtSignature::new("sig-foreign")
+			.with_origin(ThoughtOrigin::new(&ModelIden::new(AdapterKind::Gemini, MODEL), None)),
+	);
+	let legacy = ContentPart::ThoughtSignature(ThoughtSignature::new("sig-legacy"));
+	let call = ContentPart::ToolCall(ToolCall {
+		call_id: "call_1".to_string(),
+		fn_name: "get_weather".to_string(),
+		fn_arguments: json!({"city": "Chennai"}),
+		thought_signatures: Some(vec!["sig-from-tool-call".to_string()]),
+	});
 
-	// -- Exec
-	let request = support_request(chat_req, None, ServiceType::Chat)?;
+	for parts in [vec![call.clone()], vec![foreign, call.clone()], vec![legacy, call]] {
+		let assistant = ChatMessage::assistant(MessageContent::from_parts(parts));
+		let chat_req = ChatRequest::new(vec![ChatMessage::user("Weather?"), assistant]);
 
-	// -- Check
-	let steps = request.payload["input"].as_array().ok_or("input should be an array")?;
-	assert_eq!(steps.len(), 3, "steps: {steps:#?}");
-	assert_eq!(steps[1]["type"], "thought");
-	assert_eq!(steps[1]["signature"], "sig-from-tool-call");
-	assert_eq!(steps[2]["type"], "function_call");
+		// -- Exec
+		let request = support_request(chat_req, None, ServiceType::Chat)?;
+
+		// -- Check
+		let steps = request.payload["input"].as_array().ok_or("input should be an array")?;
+		assert_eq!(steps.len(), 3, "steps: {steps:#?}");
+		assert_eq!(steps[1]["type"], "thought");
+		assert_eq!(steps[1]["signature"], "skip_thought_signature_validator");
+		assert_eq!(steps[2]["type"], "function_call");
+	}
 
 	Ok(())
 }
 
-/// A signature carried both as a standalone part and on the tool call must not be sent twice.
+/// A signature carried both as a standalone part and on the tool call is sent once, from the part.
 #[test]
 fn test_gemini_ix_thought_signature_is_not_emitted_twice() -> Result<()> {
 	// -- Setup & Fixtures
 	let assistant = ChatMessage {
 		role: ChatRole::Assistant,
 		content: MessageContent::from_parts(vec![
-			ContentPart::ThoughtSignature("sig-abc".to_string()),
+			own_signature("sig-abc"),
 			ContentPart::ToolCall(ToolCall {
 				call_id: "call_1".to_string(),
 				fn_name: "get_weather".to_string(),
