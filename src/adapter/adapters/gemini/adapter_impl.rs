@@ -137,8 +137,8 @@ impl Adapter for GeminiAdapter {
 		Ok(models)
 	}
 
-	/// NOTE: As Google Gemini has decided to put their API_KEY in the URL,
-	///       this will return the URL without the API_KEY in it. The API_KEY will need to be added by the caller.
+	/// NOTE: The API key is sent as the `x-goog-api-key` header (see `to_web_request_data`), never as
+	///       `?key=` in the URL, so the same request shape works through gateways (e.g. OpenCode Zen).
 	fn get_service_url(model: &ModelIden, service_type: ServiceType, endpoint: Endpoint) -> Result<String> {
 		let base_url = endpoint.base_url();
 		let (_, model_name) = model.model_name.namespace_and_name();

@@ -907,3 +907,39 @@ fn test_gemini_4_unsigned_first_call_gets_the_validator_placeholder_and_2_5_does
 }
 
 // endregion: --- Gemini 3 and later
+
+#[test]
+fn test_gemini_api_key_is_sent_as_x_goog_api_key_header_not_query() -> Result<()> {
+	for (service_type, endpoint) in [
+		(ServiceType::Chat, GeminiAdapter::default_endpoint(AdapterKind::Gemini)),
+		(
+			ServiceType::ChatStream,
+			Endpoint::from_static("https://opencode.ai/zen/v1/"),
+		),
+	] {
+		let target = ServiceTarget {
+			model: ModelIden::new(AdapterKind::Gemini, "gemini-2.5-flash"),
+			auth: AuthData::from_single("test-key"),
+			endpoint,
+		};
+		let web_req = GeminiAdapter::to_web_request_data(
+			target,
+			service_type,
+			ChatRequest::from_user("hello"),
+			ChatOptionsSet::default(),
+		)?;
+		let header = web_req
+			.headers
+			.iter()
+			.find(|(k, _)| *k == "x-goog-api-key")
+			.map(|(_, v)| v.as_str());
+		assert_eq!(header, Some("test-key"));
+		assert!(
+			!web_req.url.contains("key="),
+			"url must not carry the key: {}",
+			web_req.url
+		);
+	}
+
+	Ok(())
+}
