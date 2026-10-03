@@ -182,11 +182,14 @@ impl_pass_through_adapter!(
 );
 
 // -- OpenRouter
+// Request shaping (attribution headers, unified `reasoning`, `cache_control`, `provider`) lives in
+// `OpenAIAdapter::util_to_web_request_data`, keyed on `AdapterKind::OpenRouter`.
 pub struct OpenRouterAdapter;
 impl_pass_through_adapter!(
 	name: OpenRouterAdapter,
 	kind: AdapterKind::OpenRouter,
 	key_env: Some("OPEN_ROUTER_API_KEY"),
+	key_env_alt: ["OPENROUTER_API_KEY"],
 	endpoint: "https://openrouter.ai/api/v1/",
 	delegate: OpenAIAdapter,
 );

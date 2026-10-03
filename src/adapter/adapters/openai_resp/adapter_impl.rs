@@ -316,8 +316,11 @@ impl Adapter for OpenAIRespAdapter {
 		// -- Capture the provider_model_iden
 		let provider_model_iden = model_iden.from_name(&resp.model);
 
-		// -- Capture the usage
-		let usage = resp.usage.map(Usage::from).unwrap_or_default();
+		// -- Capture the usage (a gateway-injected top-level `cost` is the billed amount and wins)
+		let mut usage = resp.usage.map(Usage::from).unwrap_or_default();
+		if resp.cost.is_some() {
+			usage.cost = resp.cost;
+		}
 
 		// -- Capture the content
 		let mut content: MessageContent = MessageContent::default();
@@ -1166,6 +1169,36 @@ mod tests {
 
 		assert_eq!(web_req.payload["prompt_cache_retention"], "24h");
 		assert!(web_req.payload.get("prompt_cache_options").is_none());
+	}
+
+	/// OpenCode Zen injects the billed USD amount as a top-level `cost` string on the response body.
+	#[test]
+	fn test_to_chat_response_lifts_zen_top_level_cost() {
+		let web_response = WebResponse {
+			status: reqwest::StatusCode::OK,
+			body: json!({
+				"id": "resp_1",
+				"status": "completed",
+				"model": "gpt-5.6",
+				"output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}],
+				"usage": {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15},
+				"cost": "0.00123400"
+			}),
+		};
+
+		let response = OpenAIRespAdapter::to_chat_response(
+			ModelIden::new(AdapterKind::OpenAIResp, "gpt-5.6"),
+			web_response,
+			ChatOptionsSet::default(),
+		)
+		.expect("chat response");
+
+		let cost = response.usage.cost.as_ref().expect("cost");
+		assert_eq!(cost.amount, 0.001234);
+		assert_eq!(cost.currency, "USD");
+		assert_eq!(cost.source, crate::chat::UsageCostSource::ProviderReported);
+		assert_eq!(response.usage.prompt_tokens, Some(12));
+		assert_eq!(response.first_text(), Some("ok"));
 	}
 }
 

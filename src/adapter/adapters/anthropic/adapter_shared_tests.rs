@@ -961,6 +961,31 @@ fn test_non_stream_usage_without_thinking_share_has_no_completion_details() {
 	assert_eq!(response.usage.completion_tokens, Some(4));
 }
 
+/// OpenCode Zen injects the billed USD amount as a top-level `cost` string on the messages body.
+#[test]
+fn test_non_stream_lifts_zen_top_level_cost() {
+	let response = AnthropicAdapter::build_chat_response(
+		ModelIden::new(AdapterKind::Anthropic, "fixture-model"),
+		WebResponse {
+			status: StatusCode::OK,
+			body: json!({
+				"model": "fixture-model",
+				"content": [{"type": "text", "text": "ok"}],
+				"stop_reason": "end_turn",
+				"usage": {"input_tokens": 3, "output_tokens": 4},
+				"cost": "0.00123400"
+			}),
+		},
+	)
+	.expect("Anthropic response should parse");
+
+	let cost = response.usage.cost.expect("cost");
+	assert_eq!(cost.amount, 0.001234);
+	assert_eq!(cost.currency, "USD");
+	assert_eq!(cost.source, crate::chat::UsageCostSource::ProviderReported);
+	assert_eq!(response.usage.total_tokens, Some(7));
+}
+
 #[test]
 fn test_non_stream_usage_zero_thinking_tokens_is_none() -> Result<()> {
 	// -- Setup & Fixtures

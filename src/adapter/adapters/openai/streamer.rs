@@ -2,7 +2,7 @@ use super::OpenAIAdapter;
 use crate::adapter::AdapterKind;
 use crate::adapter::adapters::support::{StreamerCapturedData, StreamerOptions, new_frame_tap};
 use crate::adapter::inter_stream::{InterStreamEnd, InterStreamEvent};
-use crate::chat::{ChatOptionsSet, StopReason, ToolCall, Usage};
+use crate::chat::{ChatOptionsSet, StopReason, ToolCall, Usage, UsageCost};
 use crate::webc::{Event, EventSourceStream};
 use crate::{Error, ModelIden, Result};
 use serde_json::Value;
@@ -51,6 +51,15 @@ fn usage_has_token_counts(usage: &Usage) -> bool {
 		|| usage.completion_tokens_details.is_some()
 }
 
+/// Replaces the captured usage, keeping an already-captured provider cost when the new snapshot has none
+/// (a gateway may inject the billed cost in a frame other than the token-count frame).
+fn set_usage(captured_usage: &mut Option<Usage>, mut usage: Usage) {
+	if usage.cost.is_none() {
+		usage.cost = captured_usage.take().and_then(|prior| prior.cost);
+	}
+	*captured_usage = Some(usage);
+}
+
 fn capture_usage_tail(
 	captured_usage: &mut Option<Usage>,
 	message_data: &mut Value,
@@ -66,7 +75,7 @@ fn capture_usage_tail(
 	}
 
 	if let Some(usage) = take_usage(message_data, "usage", adapter_kind) {
-		*captured_usage = Some(usage);
+		set_usage(captured_usage, usage);
 	}
 }
 
@@ -78,6 +87,9 @@ pub struct OpenAIStreamer {
 	/// Flag to prevent polling the EventSource after a MessageStop event
 	done: bool,
 	captured_data: StreamerCapturedData,
+	/// End built at `[DONE]`, held until the connection closes so a trailing gateway cost
+	/// frame (OpenCode Zen `{"choices":[],"cost":"…"}`) can still land in `captured_usage`.
+	pending_end: Option<InterStreamEnd>,
 }
 
 impl OpenAIStreamer {
@@ -89,6 +101,7 @@ impl OpenAIStreamer {
 			done: false,
 			options: StreamerOptions::new(model_iden, options_set),
 			captured_data: Default::default(),
+			pending_end: None,
 		}
 	}
 
@@ -147,10 +160,9 @@ impl futures::Stream for OpenAIStreamer {
 				Some(Ok(Event::Open)) => return Poll::Ready(Some(Ok(InterStreamEvent::Start))),
 				Some(Ok(Event::Message(message))) => {
 					// -- End Message
-					// According to OpenAI Spec, this is the end message
+					// According to OpenAI Spec, this is the end message.
+					// The End event is held until the stream closes (or a cost frame arrives), see `pending_end`.
 					if message.data == "[DONE]" {
-						self.done = true;
-
 						// -- Build the usage and captured_content
 						// TODO: Needs to clarify wh for usage we do not adopt the same strategy from captured content below
 						let captured_usage = if self.options.capture_usage {
@@ -197,8 +209,8 @@ impl futures::Stream for OpenAIStreamer {
 							None
 						};
 
-						// Return the internal stream end
-						let inter_stream_end = InterStreamEnd {
+						// Hold the internal stream end until the connection closes
+						self.pending_end = Some(InterStreamEnd {
 							captured_usage,
 							captured_stop_reason: self.captured_data.stop_reason.take().map(StopReason::from),
 							captured_text_content: self.captured_data.content.take(),
@@ -207,9 +219,8 @@ impl futures::Stream for OpenAIStreamer {
 							captured_thought_signatures: None,
 							captured_thought_blocks: None,
 							captured_response_id: None,
-						};
-
-						return Poll::Ready(Some(Ok(InterStreamEvent::End(inter_stream_end))));
+						});
+						continue;
 					}
 
 					// -- Other Content Messages
@@ -222,6 +233,22 @@ impl futures::Stream for OpenAIStreamer {
 
 					if let Some(error) = take_stream_error(&mut message_data, &self.options.model_iden) {
 						return Poll::Ready(Some(Err(error)));
+					}
+
+					// -- Gateway-injected billed cost (OpenCode Zen: top-level `cost` string, sent after `[DONE]`)
+					if self.options.capture_usage
+						&& let Some(cost) = message_data.get("cost").and_then(UsageCost::provider_reported)
+					{
+						if let Some(mut end) = self.pending_end.take() {
+							end.captured_usage.get_or_insert_default().cost = Some(cost);
+							self.done = true;
+							return Poll::Ready(Some(Ok(InterStreamEvent::End(end))));
+						}
+						self.captured_data.usage.get_or_insert_default().cost = Some(cost);
+					}
+					if self.pending_end.is_some() {
+						// Nothing but a cost frame is meaningful after `[DONE]`
+						continue;
 					}
 
 					let first_choice: Option<Value> = message_data.x_take("/choices/0").ok();
@@ -270,7 +297,7 @@ impl futures::Stream for OpenAIStreamer {
 							if let Some(usage) =
 								take_finish_reason_usage(&mut message_data, adapter_kind, self.options.capture_usage)
 							{
-								self.captured_data.usage = Some(usage);
+								set_usage(&mut self.captured_data.usage, usage);
 							}
 
 							// NOTE: Some providers (e.g., mistral) send delta/content AND finish_reason
@@ -408,6 +435,10 @@ impl futures::Stream for OpenAIStreamer {
 					})));
 				}
 				None => {
+					if let Some(end) = self.pending_end.take() {
+						self.done = true;
+						return Poll::Ready(Some(Ok(InterStreamEvent::End(end))));
+					}
 					return Poll::Ready(None);
 				}
 			}
@@ -420,9 +451,102 @@ impl futures::Stream for OpenAIStreamer {
 mod tests {
 	use super::*;
 	use crate::adapter::AdapterKind;
+	use crate::adapter::adapters::support::test_support::{
+		capture_all, chunks_text, collect, options_set, single_end, sse_stream,
+	};
+	use crate::chat::UsageCostSource;
 
 	fn test_model() -> ModelIden {
 		ModelIden::new(AdapterKind::OpenAI, "test-model")
+	}
+
+	async fn run(kind: AdapterKind, body: &str) -> Vec<Result<InterStreamEvent>> {
+		let options = capture_all();
+		let streamer = OpenAIStreamer::new(sse_stream(body).await, ModelIden::new(kind, "m"), options_set(&options));
+		collect(streamer).await
+	}
+
+	#[tokio::test]
+	async fn test_zen_chat_stream_cost_frame_after_done_lands_in_usage() {
+		// OpenCode Zen (chat format): upstream chunks, `[DONE]`, then `{"choices":[],"cost":"…"}`.
+		let body = concat!(
+			"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n",
+			"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+			"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\n\n",
+			"data: [DONE]\n\n",
+			"data: {\"choices\":[],\"cost\":\"0.00123400\"}\n\n",
+		);
+		let events = run(AdapterKind::OpenAI, body).await;
+		let end = single_end(&events);
+		let usage = end.captured_usage.as_ref().expect("usage");
+		assert_eq!(usage.prompt_tokens, Some(10));
+		assert_eq!(usage.completion_tokens, Some(2));
+		let cost = usage.cost.as_ref().expect("cost");
+		assert_eq!(cost.amount, 0.001234);
+		assert_eq!(cost.currency, "USD");
+		assert_eq!(cost.source, UsageCostSource::ProviderReported);
+		assert_eq!(chunks_text(&events), "Hi");
+		assert!(
+			matches!(events.last(), Some(Ok(InterStreamEvent::End(_)))),
+			"End must be last: {events:?}"
+		);
+	}
+
+	#[tokio::test]
+	async fn test_openrouter_stream_comment_trailing_usage_and_no_duplicate_content() {
+		// OpenRouter: keep-alive comments, content, a finish chunk, then a usage chunk that repeats
+		// one choice with an empty delta and the finish_reason.
+		let body = concat!(
+			": OPENROUTER PROCESSING\n\n",
+			"data: {\"id\":\"gen-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hel\"},\"finish_reason\":null}]}\n\n",
+			": OPENROUTER PROCESSING\n\n",
+			"data: {\"id\":\"gen-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"},\"finish_reason\":null}]}\n\n",
+			"data: {\"id\":\"gen-1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+			"data: {\"id\":\"gen-1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],",
+			"\"usage\":{\"prompt_tokens\":22040,\"completion_tokens\":391,\"total_tokens\":22431,",
+			"\"prompt_tokens_details\":{\"cached_tokens\":11041,\"cache_write_tokens\":0},",
+			"\"completion_tokens_details\":{\"reasoning_tokens\":120},\"cost\":0.0123,",
+			"\"cost_details\":{\"upstream_inference_cost\":null}}}\n\n",
+			"data: [DONE]\n\n",
+		);
+		let events = run(AdapterKind::OpenRouter, body).await;
+		assert_eq!(chunks_text(&events), "Hello");
+		let end = single_end(&events);
+		assert_eq!(end.captured_text_content.as_deref(), Some("Hello"));
+		assert_eq!(
+			end.captured_stop_reason,
+			Some(StopReason::Completed("stop".to_string()))
+		);
+		let usage = end.captured_usage.as_ref().expect("usage");
+		assert_eq!(usage.prompt_tokens, Some(22040));
+		assert_eq!(usage.completion_tokens, Some(391));
+		assert_eq!(
+			usage.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens),
+			Some(11041)
+		);
+		assert_eq!(
+			usage.completion_tokens_details.as_ref().and_then(|d| d.reasoning_tokens),
+			Some(120)
+		);
+		assert_eq!(usage.cost.as_ref().map(|c| c.amount), Some(0.0123));
+	}
+
+	#[tokio::test]
+	async fn test_openrouter_stream_error_chunk_at_200_is_stream_error() {
+		let body = concat!(
+			": OPENROUTER PROCESSING\n\n",
+			"data: {\"error\":{\"code\":502,\"message\":\"Provider returned error\",",
+			"\"metadata\":{\"error_type\":\"upstream_error\",\"provider_code\":\"overloaded\"}}}\n\n",
+		);
+		let events = run(AdapterKind::OpenRouter, body).await;
+		let err = events
+			.iter()
+			.find_map(|event| event.as_ref().err())
+			.unwrap_or_else(|| panic!("expected an error event: {events:?}"));
+		let text = err.to_string();
+		assert!(text.contains("upstream_error"), "error_type missing: {text}");
+		assert!(text.contains("Provider returned error"), "message missing: {text}");
+		assert!(matches!(err, Error::ChatResponse { .. }), "unexpected variant: {err:?}");
 	}
 
 	#[test]

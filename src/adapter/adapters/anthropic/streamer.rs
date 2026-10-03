@@ -1,7 +1,7 @@
 use super::parse_cache_creation_details;
 use crate::adapter::adapters::support::{StreamerCapturedData, StreamerOptions, new_frame_tap};
 use crate::adapter::inter_stream::{InterStreamEnd, InterStreamEvent, InterStreamThoughtBlock};
-use crate::chat::{ChatOptionsSet, PromptTokensDetails, StopReason, ToolCall, Usage};
+use crate::chat::{ChatOptionsSet, PromptTokensDetails, StopReason, ToolCall, Usage, UsageCost};
 use crate::webc::{Event, EventSourceStream};
 use crate::{Error, ModelIden, Result};
 use serde_json::{Map, Value};
@@ -22,6 +22,9 @@ pub struct AnthropicStreamer {
 	captured_thought_blocks: Vec<InterStreamThoughtBlock>,
 	in_progress_block: InProgressBlock,
 	pending_events: VecDeque<InterStreamEvent>,
+	/// End built at `message_stop`, held until the connection closes so a trailing gateway cost
+	/// frame (OpenCode Zen `event: ping` `{"type":"ping","cost":"…"}`) can still land in `captured_usage`.
+	pending_end: Option<InterStreamEnd>,
 	/// Ensures the unreplayable-thinking warning is emitted at most once per stream.
 	warned_unreplayable_thinking: bool,
 }
@@ -85,6 +88,7 @@ impl AnthropicStreamer {
 			captured_thought_blocks: Vec::new(),
 			in_progress_block: InProgressBlock::Text,
 			pending_events: VecDeque::new(),
+			pending_end: None,
 			warned_unreplayable_thinking: false,
 		}
 	}
@@ -326,11 +330,6 @@ impl futures::Stream for AnthropicStreamer {
 						}
 						// -- END MESSAGE
 						"message_stop" => {
-							// Ensure we do not poll the EventSource anymore on the next poll.
-							// NOTE: This way, the last MessageStop event is still sent,
-							//       but then, on the next poll, it will be stopped.
-							self.done = true;
-
 							// Capture the usage
 							let captured_usage = if self.options.capture_usage {
 								self.captured_data.usage.take().map(|mut usage| {
@@ -346,7 +345,8 @@ impl futures::Stream for AnthropicStreamer {
 								None
 							};
 
-							let inter_stream_end = InterStreamEnd {
+							// Held until the connection closes (or a cost ping arrives), see `pending_end`.
+							self.pending_end = Some(InterStreamEnd {
 								captured_usage,
 								captured_stop_reason: self.captured_data.stop_reason.take().map(StopReason::from),
 								captured_text_content: self.captured_data.content.take(),
@@ -356,13 +356,31 @@ impl futures::Stream for AnthropicStreamer {
 								captured_thought_blocks: (!self.captured_thought_blocks.is_empty())
 									.then(|| std::mem::take(&mut self.captured_thought_blocks)),
 								captured_response_id: None,
-							};
-
-							// TODO: Need to capture the data as needed
-							return Poll::Ready(Some(Ok(InterStreamEvent::End(inter_stream_end))));
+							});
+							continue;
 						}
 
 						"ping" => {
+							// OpenCode Zen injects the billed cost as a `ping` after `message_stop`;
+							// a plain ping is a heartbeat.
+							let cost = self
+								.options
+								.capture_usage
+								.then(|| serde_json::from_str::<Value>(&message.data).ok())
+								.flatten()
+								.and_then(|data| data.get("cost").and_then(UsageCost::provider_reported));
+							if let Some(cost) = cost {
+								if let Some(mut end) = self.pending_end.take() {
+									end.captured_usage.get_or_insert_default().cost = Some(cost);
+									self.done = true;
+									return Poll::Ready(Some(Ok(InterStreamEvent::End(end))));
+								}
+								self.captured_data.usage.get_or_insert_default().cost = Some(cost);
+								continue;
+							}
+							if self.pending_end.is_some() {
+								continue;
+							}
 							// Map ping events to Heartbeat events to indicate the stream is still active
 							return Poll::Ready(Some(Ok(InterStreamEvent::Heartbeat)));
 						}
@@ -390,7 +408,13 @@ impl futures::Stream for AnthropicStreamer {
 						error: err,
 					})));
 				}
-				None => return Poll::Ready(None),
+				None => {
+					if let Some(end) = self.pending_end.take() {
+						self.done = true;
+						return Poll::Ready(Some(Ok(InterStreamEvent::End(end))));
+					}
+					return Poll::Ready(None);
+				}
 			}
 		}
 		Poll::Pending
@@ -494,7 +518,83 @@ impl AnthropicStreamer {
 
 #[cfg(test)]
 mod tests {
-	use super::ThinkingBlock;
+	use super::{AnthropicStreamer, ThinkingBlock};
+	use crate::ModelIden;
+	use crate::adapter::AdapterKind;
+	use crate::adapter::adapters::support::test_support::{capture_all, chunks_text, collect, options_set, sse_stream};
+	use crate::adapter::inter_stream::InterStreamEvent;
+	use crate::chat::UsageCostSource;
+
+	const ANTHROPIC_STREAM: &str = concat!(
+		"event: message_start\n",
+		"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":25,\"output_tokens\":1,\"cache_read_input_tokens\":5}}}\n\n",
+		"event: ping\n",
+		"data: {\"type\":\"ping\"}\n\n",
+		"event: content_block_start\n",
+		"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+		"event: content_block_delta\n",
+		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
+		"event: content_block_stop\n",
+		"data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+		"event: message_delta\n",
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n\n",
+		"event: message_stop\n",
+		"data: {\"type\":\"message_stop\"}\n\n",
+	);
+
+	async fn run(body: &str) -> Vec<crate::Result<InterStreamEvent>> {
+		let options = capture_all();
+		let model = ModelIden::new(AdapterKind::Anthropic, "m");
+		collect(AnthropicStreamer::new(
+			sse_stream(body).await,
+			model,
+			options_set(&options),
+		))
+		.await
+	}
+
+	#[tokio::test]
+	async fn test_zen_anthropic_stream_cost_ping_after_message_stop_lands_in_usage() {
+		let body = format!("{ANTHROPIC_STREAM}event: ping\ndata: {{\"type\":\"ping\",\"cost\":\"0.00123400\"}}\n\n");
+		let events = run(&body).await;
+		let Some(Ok(InterStreamEvent::End(end))) = events.last() else {
+			panic!("End must be last: {events:?}");
+		};
+		let usage = end.captured_usage.as_ref().expect("usage");
+		assert_eq!(usage.prompt_tokens, Some(30));
+		assert_eq!(usage.completion_tokens, Some(7));
+		assert_eq!(usage.total_tokens, Some(37));
+		let cost = usage.cost.as_ref().expect("cost");
+		assert_eq!(cost.amount, 0.001234);
+		assert_eq!(cost.source, UsageCostSource::ProviderReported);
+		assert_eq!(chunks_text(&events), "Hello");
+		// The in-stream plain ping is still a heartbeat; the cost ping is not.
+		let heartbeats = events
+			.iter()
+			.filter(|event| matches!(event, Ok(InterStreamEvent::Heartbeat)))
+			.count();
+		assert_eq!(heartbeats, 1);
+	}
+
+	#[tokio::test]
+	async fn test_anthropic_plain_ping_changes_nothing() {
+		let events = run(ANTHROPIC_STREAM).await;
+		let Some(Ok(InterStreamEvent::End(end))) = events.last() else {
+			panic!("End must be last: {events:?}");
+		};
+		let usage = end.captured_usage.as_ref().expect("usage");
+		assert_eq!(usage.prompt_tokens, Some(30));
+		assert_eq!(usage.completion_tokens, Some(7));
+		assert!(usage.cost.is_none());
+		assert_eq!(chunks_text(&events), "Hello");
+		assert_eq!(
+			events
+				.iter()
+				.filter(|event| matches!(event, Ok(InterStreamEvent::Heartbeat)))
+				.count(),
+			1
+		);
+	}
 
 	fn signature(start: &str, deltas: &[&str]) -> Option<String> {
 		let mut block = ThinkingBlock::new(None, Some(start.to_string()));

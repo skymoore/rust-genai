@@ -26,8 +26,8 @@ pub struct Usage {
 	/// (including cache read/creation tokens when applicable).
 	pub total_tokens: Option<i32>,
 
-	/// Monetary cost of the call when the provider reports it (e.g. OpenRouter's top-level `usage.cost`, USD).
-	/// Deserializes from either a raw number (provider-reported USD) or the structured `UsageCost` object.
+	/// Monetary cost of the call when the provider reports it (e.g. OpenRouter's `usage.cost`, USD).
+	/// Deserializes from a raw number, a decimal string (OpenCode Zen's `"0.00123400"`), or the structured `UsageCost` object.
 	#[serde(default, deserialize_with = "deserialize_cost")]
 	pub cost: Option<UsageCost>,
 }
@@ -41,6 +41,24 @@ pub struct UsageCost {
 	pub source: UsageCostSource,
 }
 
+impl UsageCost {
+	/// Provider-reported USD cost from a JSON number or decimal string; `None` for anything else
+	/// (negative, non-finite, unparsable). Used for gateway-injected cost fields such as
+	/// OpenCode Zen's top-level `cost` / `ping {cost}` frames.
+	pub(crate) fn provider_reported(value: &serde_json::Value) -> Option<Self> {
+		let amount = match value {
+			serde_json::Value::Number(number) => number.as_f64()?,
+			serde_json::Value::String(text) => text.trim().parse::<f64>().ok()?,
+			_ => return None,
+		};
+		(amount.is_finite() && amount >= 0.0).then(|| UsageCost {
+			amount,
+			currency: "USD".to_string(),
+			source: UsageCostSource::ProviderReported,
+		})
+	}
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageCostSource {
@@ -48,23 +66,20 @@ pub enum UsageCostSource {
 	AdapterEstimated,
 }
 
-fn deserialize_cost<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<UsageCost>, D::Error> {
+pub(crate) fn deserialize_cost<'de, D: serde::Deserializer<'de>>(
+	deserializer: D,
+) -> Result<Option<UsageCost>, D::Error> {
 	#[derive(Deserialize)]
 	#[serde(untagged)]
 	enum Raw {
-		Amount(f64),
 		Cost(UsageCost),
-		Other(serde::de::IgnoredAny),
+		Other(serde_json::Value),
 	}
 
 	Ok(match Option::<Raw>::deserialize(deserializer)? {
-		Some(Raw::Amount(amount)) if amount.is_finite() && amount >= 0.0 => Some(UsageCost {
-			amount,
-			currency: "USD".to_string(),
-			source: UsageCostSource::ProviderReported,
-		}),
 		Some(Raw::Cost(cost)) => Some(cost),
-		_ => None,
+		Some(Raw::Other(value)) => UsageCost::provider_reported(&value),
+		None => None,
 	})
 }
 

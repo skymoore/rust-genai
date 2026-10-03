@@ -7,6 +7,9 @@
 /// - `name`: The adapter struct name (e.g., `MiniMaxAdapter`).
 /// - `kind`: The `AdapterKind` variant for this adapter (used in unsupported-feature errors).
 /// - `key_env`: The default API key environment variable name as `Option<&'static str>`.
+/// - `key_env_alt`: (Optional) Alternative env var names tried, in order, before `key_env` by
+///   `default_auth` (first one set in the process environment wins; `key_env` remains the
+///   reported default and the one named in a "not found" error).
 /// - `endpoint`: The default endpoint URL as a string literal.
 /// - `delegate`: The target adapter type to which all trait methods are forwarded.
 /// - `unsupported`: (Optional) A list of features not supported. Currently only `embeddings` is recognized.
@@ -33,6 +36,7 @@ macro_rules! impl_pass_through_adapter {
 		name: $name:ident,
 		kind: $kind:expr,
 		key_env: $key_env:expr,
+		$(key_env_alt: [ $($key_env_alt:literal),* $(,)? ],)?
 		endpoint: $endpoint:expr,
 		delegate: $delegate:ty
 		$(, unsupported: [ $($unsupported:ident),* $(,)? ])?
@@ -46,6 +50,7 @@ macro_rules! impl_pass_through_adapter {
 				@common_methods
 				delegate = $delegate,
 				endpoint = $endpoint
+				$(, key_env_alt: [ $($key_env_alt),* ])?
 				$(, managed_body_thinking: $managed_body_thinking)?
 			);
 
@@ -96,11 +101,21 @@ macro_rules! impl_pass_through_adapter {
 	(@common_methods
 		delegate = $delegate:ty,
 		endpoint = $endpoint:expr
+		$(, key_env_alt: [ $($key_env_alt:literal),* ])?
 		$(, managed_body_thinking: $managed_body_thinking:tt)?
 	) => {
 		fn default_auth(_kind: $crate::adapter::AdapterKind) -> $crate::resolver::AuthData {
 			match Self::DEFAULT_API_KEY_ENV_NAME {
-				Some(env_name) => $crate::resolver::AuthData::from_env(env_name),
+				Some(env_name) => {
+					$(
+						let env_name = $crate::adapter::adapters::support::pick_key_env_name(
+							&[$($key_env_alt),*],
+							env_name,
+							|name| ::std::env::var_os(name).is_some_and(|value| !value.is_empty()),
+						);
+					)?
+					$crate::resolver::AuthData::from_env(env_name)
+				}
 				None => $crate::resolver::AuthData::None,
 			}
 		}

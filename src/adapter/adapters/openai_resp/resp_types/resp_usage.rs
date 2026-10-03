@@ -1,4 +1,4 @@
-use crate::chat::{CompletionTokensDetails, PromptTokensDetails, Usage};
+use crate::chat::{CompletionTokensDetails, PromptTokensDetails, Usage, UsageCost};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 
@@ -26,6 +26,10 @@ pub struct RespUsage {
 	/// Total tokens as reported by the API, or computed as prompt + completion
 	/// (including cache read/creation tokens when applicable).
 	pub total_tokens: Option<i32>,
+
+	/// Provider-reported cost (gateways such as OpenRouter/OpenCode Zen may inject it here).
+	#[serde(default, deserialize_with = "crate::chat::deserialize_cost")]
+	pub cost: Option<UsageCost>,
 }
 
 impl RespUsage {
@@ -119,7 +123,7 @@ impl From<RespUsage> for Usage {
 			completion_tokens: value.output_tokens,
 			completion_tokens_details: value.output_tokens_details.map(Into::into),
 			total_tokens: value.total_tokens,
-			cost: None,
+			cost: value.cost,
 		}
 	}
 }

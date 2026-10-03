@@ -101,6 +101,15 @@ pub struct ChatOptions {
 	/// This is primarily useful for OpenAI-compatible providers that expose
 	/// non-standard request fields.
 	pub extra_body: Option<Value>,
+
+	// -- OpenRouter options (ignored by every other adapter)
+	/// OpenRouter provider routing preferences, sent verbatim as the top-level `provider` object.
+	/// See <https://openrouter.ai/docs/features/provider-routing>.
+	pub openrouter_provider: Option<Value>,
+
+	/// OpenRouter prompt caching: when `true`, sends top-level `cache_control: {"type": "ephemeral"}`
+	/// (OpenRouter's automatic trailing breakpoint for Anthropic/Gemini/Bedrock/Vertex models).
+	pub openrouter_cache_control: Option<bool>,
 }
 
 /// Chainable Setters
@@ -256,6 +265,18 @@ impl ChatOptions {
 	/// Sets provider-specific extra body fields.
 	pub fn with_extra_body(mut self, value: Value) -> Self {
 		self.extra_body = Some(value);
+		self
+	}
+
+	/// Sets the OpenRouter `provider` routing preferences (OpenRouter only).
+	pub fn with_openrouter_provider(mut self, value: Value) -> Self {
+		self.openrouter_provider = Some(value);
+		self
+	}
+
+	/// Enables OpenRouter's top-level `cache_control: {"type": "ephemeral"}` (OpenRouter only).
+	pub fn with_openrouter_cache_control(mut self, value: bool) -> Self {
+		self.openrouter_cache_control = Some(value);
 		self
 	}
 
@@ -674,6 +695,18 @@ impl ChatOptionsSet<'_, '_> {
 		self.chat
 			.and_then(|chat| chat.cache_control.as_ref())
 			.or_else(|| self.client.and_then(|client| client.cache_control.as_ref()))
+	}
+
+	pub fn openrouter_provider(&self) -> Option<&Value> {
+		self.chat
+			.and_then(|chat| chat.openrouter_provider.as_ref())
+			.or_else(|| self.client.and_then(|client| client.openrouter_provider.as_ref()))
+	}
+
+	pub fn openrouter_cache_control(&self) -> Option<bool> {
+		self.chat
+			.and_then(|chat| chat.openrouter_cache_control)
+			.or_else(|| self.client.and_then(|client| client.openrouter_cache_control))
 	}
 
 	/// Returns true only if there is a ChatResponseFormat::JsonMode

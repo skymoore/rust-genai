@@ -134,8 +134,8 @@ impl Adapter for GeminiAdapter {
 		Ok(models)
 	}
 
-	/// NOTE: As Google Gemini has decided to put their API_KEY in the URL,
-	///       this will return the URL without the API_KEY in it. The API_KEY will need to be added by the caller.
+	/// NOTE: The API key is sent as the `x-goog-api-key` header (see `to_web_request_data`), never as
+	///       `?key=` in the URL, so the same request shape works through gateways (e.g. OpenCode Zen).
 	fn get_service_url(model: &ModelIden, service_type: ServiceType, endpoint: Endpoint) -> Result<String> {
 		let base_url = endpoint.base_url();
 		let (_, model_name) = model.model_name.namespace_and_name();
@@ -1464,6 +1464,41 @@ mod tests {
 			decl.get("parameters").is_none(),
 			"must not use the restricted `parameters` field"
 		);
+	}
+
+	#[test]
+	fn api_key_is_sent_as_x_goog_api_key_header_not_query() {
+		for (service_type, endpoint) in [
+			(ServiceType::Chat, GeminiAdapter::default_endpoint(AdapterKind::Gemini)),
+			(
+				ServiceType::ChatStream,
+				Endpoint::from_static("https://opencode.ai/zen/v1/"),
+			),
+		] {
+			let target = ServiceTarget {
+				model: ModelIden::new(AdapterKind::Gemini, "gemini-2.5-flash"),
+				auth: AuthData::from_single("test-key"),
+				endpoint,
+			};
+			let web_req = GeminiAdapter::to_web_request_data(
+				target,
+				service_type,
+				ChatRequest::from_user("hello"),
+				ChatOptionsSet::default(),
+			)
+			.unwrap();
+			let header = web_req
+				.headers
+				.iter()
+				.find(|(k, _)| *k == "x-goog-api-key")
+				.map(|(_, v)| v.as_str());
+			assert_eq!(header, Some("test-key"));
+			assert!(
+				!web_req.url.contains("key="),
+				"url must not carry the key: {}",
+				web_req.url
+			);
+		}
 	}
 
 	// region:    --- thought signatures stay with their part
