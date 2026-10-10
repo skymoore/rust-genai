@@ -293,3 +293,52 @@ fn test_anthropic_opus_5_reasoning_zero_disables_thinking() {
 		"output_config.effort must be omitted"
 	);
 }
+
+/// Haiku 5.5 rejects `thinking.type.enabled` outright (400), so it must take the adaptive
+/// branch like Opus 4.6+/Sonnet 5. Haiku 4.5 still only accepts the legacy budget form.
+#[test]
+fn test_anthropic_haiku_5_5_uses_adaptive_thinking_and_haiku_4_5_keeps_budget() {
+	let build = |model: &str| {
+		let chat_options = ChatOptions::default().with_reasoning_effort(ReasoningEffort::Medium);
+		let options_set = ChatOptionsSet::default().with_chat_options(Some(&chat_options));
+		let target = ServiceTarget {
+			endpoint: AnthropicAdapter::default_endpoint(AdapterKind::Anthropic),
+			auth: AuthData::from_single("test-key"),
+			model: ModelIden::new(AdapterKind::Anthropic, model),
+		};
+		AnthropicAdapter::to_web_request_data(target, ServiceType::Chat, ChatRequest::from_user("hello"), options_set)
+			.expect("to_web_request_data should succeed")
+			.payload
+	};
+
+	let haiku_5_5 = build("claude-haiku-5-5");
+	assert_eq!(haiku_5_5["thinking"], json!({"type": "adaptive"}));
+	assert_eq!(haiku_5_5["output_config"]["effort"], json!("medium"));
+
+	let haiku_4_5 = build("claude-haiku-4-5");
+	assert_eq!(
+		haiku_4_5["thinking"],
+		json!({"type": "enabled", "budget_tokens": REASONING_MEDIUM})
+	);
+	assert_eq!(haiku_4_5.get("output_config"), None);
+}
+
+/// Haiku 5.5 thinks by default (verified live: no `thinking` field still yields a thinking
+/// block), so `Zero` must send the explicit opt-out, as for Sonnet 5 / Opus 5.
+#[test]
+fn test_anthropic_haiku_5_5_reasoning_zero_disables_thinking() {
+	let chat_options = ChatOptions::default().with_reasoning_effort(ReasoningEffort::Zero);
+	let options_set = ChatOptionsSet::default().with_chat_options(Some(&chat_options));
+	let target = ServiceTarget {
+		endpoint: AnthropicAdapter::default_endpoint(AdapterKind::Anthropic),
+		auth: AuthData::from_single("test-key"),
+		model: ModelIden::new(AdapterKind::Anthropic, "claude-haiku-5-5"),
+	};
+
+	let web_req =
+		AnthropicAdapter::to_web_request_data(target, ServiceType::Chat, ChatRequest::from_user("hello"), options_set)
+			.expect("to_web_request_data should succeed");
+
+	assert_eq!(web_req.payload["thinking"], json!({"type": "disabled"}));
+	assert_eq!(web_req.payload.get("output_config"), None);
+}
