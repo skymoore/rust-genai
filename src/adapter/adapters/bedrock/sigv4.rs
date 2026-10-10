@@ -14,7 +14,6 @@
 //! Without the cache, a long-lived process would keep signing with credentials that expired an hour after start-up
 //! (`provide_credentials()` returns a frozen snapshot).
 
-
 use super::shared::{DEFAULT_REGION, region_from_env};
 use crate::Headers;
 use crate::resolver::AuthData;

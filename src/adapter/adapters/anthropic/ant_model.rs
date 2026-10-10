@@ -132,7 +132,7 @@ impl<'a> AnthropicModel<'a> {
 			AnthropicModelFamily::Opus => self.version().is_some_and(|version| version >= (4, 5)),
 			AnthropicModelFamily::Sonnet => matches!(self.version(), Some((4, 6) | (5, _))),
 			AnthropicModelFamily::Fable | AnthropicModelFamily::Mythos => true,
-			AnthropicModelFamily::Haiku => false,
+			AnthropicModelFamily::Haiku => self.is_haiku_5_or_later(),
 			AnthropicModelFamily::Unknown => legacy_supports_effort(self.normalized_name),
 		}
 	}
@@ -142,7 +142,7 @@ impl<'a> AnthropicModel<'a> {
 			AnthropicModelFamily::Opus => self.version().is_some_and(|version| version >= (4, 6)),
 			AnthropicModelFamily::Sonnet => matches!(self.version(), Some((4, 6) | (5, _))),
 			AnthropicModelFamily::Fable | AnthropicModelFamily::Mythos => true,
-			AnthropicModelFamily::Haiku => false,
+			AnthropicModelFamily::Haiku => self.is_haiku_5_or_later(),
 			AnthropicModelFamily::Unknown => legacy_supports_max_effort(self.normalized_name),
 		}
 	}
@@ -152,7 +152,7 @@ impl<'a> AnthropicModel<'a> {
 			AnthropicModelFamily::Opus => self.version().is_some_and(|version| version >= (4, 7)),
 			AnthropicModelFamily::Sonnet => matches!(self.version(), Some((5, _))),
 			AnthropicModelFamily::Fable | AnthropicModelFamily::Mythos => true,
-			AnthropicModelFamily::Haiku => false,
+			AnthropicModelFamily::Haiku => self.is_haiku_5_or_later(),
 			AnthropicModelFamily::Unknown => legacy_supports_xhigh_effort(self.normalized_name),
 		}
 	}
@@ -162,7 +162,7 @@ impl<'a> AnthropicModel<'a> {
 			AnthropicModelFamily::Opus => self.version().is_some_and(|version| version >= (4, 6)),
 			AnthropicModelFamily::Sonnet => matches!(self.version(), Some((4, 6) | (5, _))),
 			AnthropicModelFamily::Fable | AnthropicModelFamily::Mythos => true,
-			AnthropicModelFamily::Haiku => false,
+			AnthropicModelFamily::Haiku => self.is_haiku_5_or_later(),
 			AnthropicModelFamily::Unknown => legacy_supports_adaptive_thinking(self.normalized_name),
 		}
 	}
@@ -172,9 +172,16 @@ impl<'a> AnthropicModel<'a> {
 			AnthropicModelFamily::Opus | AnthropicModelFamily::Sonnet => {
 				matches!(self.version(), Some((5, _)))
 			}
-			AnthropicModelFamily::Haiku | AnthropicModelFamily::Fable | AnthropicModelFamily::Mythos => false,
+			AnthropicModelFamily::Haiku => self.is_haiku_5_or_later(),
+			AnthropicModelFamily::Fable | AnthropicModelFamily::Mythos => false,
 			AnthropicModelFamily::Unknown => legacy_thinking_enabled_by_default(self.normalized_name),
 		}
+	}
+
+	/// Haiku 5.5 rejects `thinking.type.enabled`; it only takes adaptive thinking plus
+	/// `output_config.effort` (low..max), and thinks by default.
+	fn is_haiku_5_or_later(&self) -> bool {
+		self.version().is_some_and(|version| version >= (5, 0))
 	}
 }
 
@@ -223,8 +230,13 @@ fn legacy_is_fable_or_mythos(model_name: &str) -> bool {
 }
 
 fn legacy_supports_effort(model_name: &str) -> bool {
-	const SUPPORT_EFFORT_MODELS: &[&str] =
-		&["claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-4-5", "claude-sonnet-5"];
+	const SUPPORT_EFFORT_MODELS: &[&str] = &[
+		"claude-opus-4-6",
+		"claude-sonnet-4-6",
+		"claude-opus-4-5",
+		"claude-sonnet-5",
+		"claude-haiku-5",
+	];
 
 	SUPPORT_EFFORT_MODELS.iter().any(|name| model_name.contains(name))
 		|| legacy_is_fable_or_mythos(model_name)
@@ -232,7 +244,7 @@ fn legacy_supports_effort(model_name: &str) -> bool {
 }
 
 fn legacy_supports_max_effort(model_name: &str) -> bool {
-	const SUPPORT_MAX_MODELS: &[&str] = &["claude-opus-4-6", "claude-sonnet-5"];
+	const SUPPORT_MAX_MODELS: &[&str] = &["claude-opus-4-6", "claude-sonnet-5", "claude-haiku-5"];
 
 	SUPPORT_MAX_MODELS.iter().any(|name| model_name.contains(name))
 		|| legacy_is_fable_or_mythos(model_name)
@@ -243,10 +255,12 @@ fn legacy_supports_xhigh_effort(model_name: &str) -> bool {
 	legacy_opus_version(model_name).is_some_and(|version| version >= (4, 7))
 		|| legacy_is_fable_or_mythos(model_name)
 		|| model_name.contains("claude-sonnet-5")
+		|| model_name.contains("claude-haiku-5")
 }
 
 fn legacy_supports_adaptive_thinking(model_name: &str) -> bool {
-	const SUPPORT_ADAPTIVE_MODELS: &[&str] = &["claude-opus-4-6", "claude-sonnet-4-6", "claude-sonnet-5"];
+	const SUPPORT_ADAPTIVE_MODELS: &[&str] =
+		&["claude-opus-4-6", "claude-sonnet-4-6", "claude-sonnet-5", "claude-haiku-5"];
 
 	SUPPORT_ADAPTIVE_MODELS.iter().any(|name| model_name.contains(name))
 		|| legacy_is_fable_or_mythos(model_name)
@@ -254,7 +268,9 @@ fn legacy_supports_adaptive_thinking(model_name: &str) -> bool {
 }
 
 fn legacy_thinking_enabled_by_default(model_name: &str) -> bool {
-	model_name.contains("claude-sonnet-5") || model_name.contains("claude-opus-5")
+	model_name.contains("claude-sonnet-5")
+		|| model_name.contains("claude-opus-5")
+		|| model_name.contains("claude-haiku-5")
 }
 
 fn max_tokens_for_name(model_name: &str) -> AnthropicMaxTokens {
@@ -407,6 +423,27 @@ mod tests {
 			("claude-fable-5", true, true, true, true, false, false),
 			("claude-mythos-5", true, true, true, true, false, false),
 			("claude-haiku-4-5", false, false, false, false, false, true),
+			("claude-haiku-5", true, true, true, true, true, false),
+			("claude-haiku-5-5", true, true, true, true, true, false),
+			// Bedrock-style id: does not parse into a family, goes through the legacy substring path.
+			(
+				"anthropic.claude-haiku-5-5-20260301-v1:0",
+				true,
+				true,
+				true,
+				true,
+				true,
+				false,
+			),
+			(
+				"us.anthropic.claude-haiku-4-5-20251001-v1:0",
+				false,
+				false,
+				false,
+				false,
+				false,
+				true,
+			),
 		];
 
 		// -- Exec & Check
