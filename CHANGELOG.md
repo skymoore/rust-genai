@@ -21,6 +21,7 @@
 - `!` API CHANGE: `ChatOptions` adds the public `raw_frame_sink: Option<Arc<dyn ChatFrameSink>>` field for observing raw stream frames across providers. Downstream `ChatOptions` struct literals must add `raw_frame_sink: None` or use `..Default::default()`.
 - `+` Add `ClientBuilder::append_provider_config`, `ClientConfig::append_provider_config`, and `ClientConfig::provider_config` to configure per-adapter endpoint and auth targets declaratively without custom resolver closures. (PR #289)
 - `+` Add `ChatOptions::with_thought_connection(label)` / `ChatOptionsSet::thought_connection()`: the caller's label for the account or gateway a request goes to. Signatures captured from the response are tagged with it and later replayed only to a request with the same label.
+- `+` Add the defaulted `ChatFrameSink::on_response(&FrameCtx, StatusCode, &HeaderMap)`: called once per streaming call when the HTTP response head arrives, success or failure, so a sink can read rate-limit headers (`anthropic-ratelimit-*`, `x-ratelimit-*`, `x-codex-*`, `retry-after`) that the success path otherwise drops. Covers every adapter on the shared web stream (SSE and delimited); not Bedrock's event stream. (theuth design 160)
 
 ### Behavior Refinement / Changes
 

@@ -175,6 +175,14 @@ pub trait ChatFrameSink: Send + Sync {
 	/// Called at most once, on the first failure. A mid-stream failure ends the stream without
 	/// an `End` event, so this is the only terminal notification a sink gets for it.
 	fn on_error(&self, _ctx: &FrameCtx, _err: &crate::Error) {}
+
+	/// Called at most once per stream, when the HTTP response head arrives, with its status and
+	/// headers — before the body is read, for success and failure statuses alike. Rate-limit and
+	/// quota headers (`retry-after`, `x-ratelimit-*`, `anthropic-ratelimit-*`, …) live here.
+	///
+	/// Not called when the request never got a response (connection or timeout errors), nor by
+	/// transports that do not go through the shared web stream (Bedrock's event stream).
+	fn on_response(&self, _ctx: &FrameCtx, _status: reqwest::StatusCode, _headers: &reqwest::header::HeaderMap) {}
 }
 
 impl std::fmt::Debug for dyn ChatFrameSink {

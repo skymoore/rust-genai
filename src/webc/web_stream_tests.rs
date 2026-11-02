@@ -187,6 +187,112 @@ async fn test_web_stream_no_sink_leaves_transport_untapped() -> Result<()> {
 	Ok(())
 }
 
+#[tokio::test]
+async fn test_web_stream_sse_on_response_sees_success_headers() -> Result<()> {
+	// -- Setup & Fixtures
+	let raw_response = "HTTP/1.1 200 OK\r\n\
+		content-type: text/event-stream\r\n\
+		anthropic-ratelimit-requests-remaining: 44999\r\n\
+		x-ratelimit-reset-tokens: 6m0s\r\n\
+		connection: close\r\n\
+		\r\n\
+		data: {\"a\":1}\n\n"
+		.to_string();
+	let url = support_spawn_one_shot_http_server(raw_response).await?;
+	let sink = Arc::new(support::ResponseSink::default());
+	let ctx = FrameCtx::new(ModelIden::new(AdapterKind::Anthropic, "test-model"));
+	let frame_tap = FrameTap::new(sink.clone(), ctx);
+
+	let reqwest_builder = reqwest::Client::new().post(&url);
+	let mut event_source = EventSourceStream::new(reqwest_builder).with_frame_tap(Some(frame_tap));
+
+	// -- Exec
+	while let Some(event) = event_source.next().await {
+		event.map_err(|err| err.to_string())?;
+	}
+
+	// -- Check
+	let seen = sink.seen.lock().map_err(|err| err.to_string())?;
+	assert_eq!(seen.len(), 1, "on_response should fire exactly once");
+	let (status, headers) = &seen[0];
+	assert_eq!(*status, 200);
+	assert_eq!(
+		headers.get("anthropic-ratelimit-requests-remaining").map(String::as_str),
+		Some("44999")
+	);
+	assert_eq!(
+		headers.get("x-ratelimit-reset-tokens").map(String::as_str),
+		Some("6m0s")
+	);
+
+	Ok(())
+}
+
+#[tokio::test]
+async fn test_web_stream_on_response_sees_error_headers_once() -> Result<()> {
+	// -- Setup & Fixtures
+	let body = r#"{"error":{"message":"rate limited"}}"#;
+	let raw_response = format!(
+		"HTTP/1.1 429 Too Many Requests\r\n\
+		content-type: application/json\r\n\
+		retry-after: 2\r\n\
+		content-length: {}\r\n\
+		connection: close\r\n\
+		\r\n\
+		{body}",
+		body.len()
+	);
+	let url = support_spawn_one_shot_http_server(raw_response).await?;
+	let sink = Arc::new(support::ResponseSink::default());
+	let ctx = FrameCtx::new(ModelIden::new(AdapterKind::OpenAI, "test-model"));
+	let frame_tap = FrameTap::new(sink.clone(), ctx);
+
+	let reqwest_builder = reqwest::Client::new().post(&url);
+	let mut web_stream = WebStream::new_with_delimiter(reqwest_builder, "\n").with_frame_tap(Some(frame_tap));
+
+	// -- Exec
+	let first_item = web_stream.next().await.ok_or("Should have a first stream item")?;
+
+	// -- Check
+	assert!(first_item.is_err(), "429 should surface as an error");
+	let seen = sink.seen.lock().map_err(|err| err.to_string())?;
+	assert_eq!(
+		seen.len(),
+		1,
+		"on_response should fire once, not again for the error body"
+	);
+	assert_eq!(seen[0].0, 429);
+	assert_eq!(seen[0].1.get("retry-after").map(String::as_str), Some("2"));
+
+	Ok(())
+}
+
+mod support {
+	use crate::chat::{ChatFrameSink, FrameCtx, RawFrameRef};
+	use std::collections::HashMap;
+	use std::sync::Mutex;
+
+	/// Records every `on_response` call as (status, header map).
+	#[derive(Default)]
+	pub(super) struct ResponseSink {
+		pub(super) seen: Mutex<Vec<(u16, HashMap<String, String>)>>,
+	}
+
+	impl ChatFrameSink for ResponseSink {
+		fn on_frame(&self, _ctx: &FrameCtx, _frame: RawFrameRef<'_>) {}
+
+		fn on_response(&self, _ctx: &FrameCtx, status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) {
+			let headers = headers
+				.iter()
+				.filter_map(|(k, v)| Some((k.as_str().to_string(), v.to_str().ok()?.to_string())))
+				.collect();
+			if let Ok(mut seen) = self.seen.lock() {
+				seen.push((status.as_u16(), headers));
+			}
+		}
+	}
+}
+
 // region:    --- Support
 
 /// Spawns a one-shot HTTP server that answers the first request with the given raw HTTP response.
