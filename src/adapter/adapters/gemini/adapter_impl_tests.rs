@@ -572,10 +572,7 @@ fn test_gemini_a_response_with_no_known_name_is_sent_without_an_id() {
 /// A signature on a text part rides that text part back, as it was returned.
 #[test]
 fn test_gemini_a_signature_on_a_text_part_rides_the_text_part_back() {
-	let content = MessageContent::from_parts(vec![
-		own("sig-t"),
-		ContentPart::Text("Done.".to_string()),
-	]);
+	let content = MessageContent::from_parts(vec![own("sig-t"), ContentPart::Text("Done.".to_string())]);
 	let chat_req = ChatRequest::new(vec![ChatMessage::user("Hi"), ChatMessage::assistant(content)]);
 
 	let parts = GeminiAdapter::into_gemini_request_parts(&gemini_3(), chat_req, None).expect("request parts");
@@ -639,7 +636,10 @@ fn test_gemini_same_origin_thought_signature_round_trips() {
 	let parts = GeminiAdapter::into_gemini_request_parts(&gemini_3(), chat_req, Some("acct")).expect("request parts");
 	assert_eq!(parts.contents[1]["parts"][0]["thoughtSignature"], "sig-a");
 
-	let chat_req = ChatRequest::new(vec![ChatMessage::user("Read."), ChatMessage::assistant(response.content)]);
+	let chat_req = ChatRequest::new(vec![
+		ChatMessage::user("Read."),
+		ChatMessage::assistant(response.content),
+	]);
 	let parts = GeminiAdapter::into_gemini_request_parts(&gemini_3(), chat_req, None).expect("request parts");
 	assert_eq!(
 		parts.contents[1]["parts"][0]["thoughtSignature"],
@@ -740,10 +740,7 @@ fn test_gemini_streamed_shape_puts_each_signature_on_its_part() {
 
 #[test]
 fn test_gemini_trailing_signature_is_dropped() {
-	let parts = model_parts(vec![
-		ContentPart::Text("Hmm.".to_string()),
-		own("sig-1"),
-	]);
+	let parts = model_parts(vec![ContentPart::Text("Hmm.".to_string()), own("sig-1")]);
 
 	assert_eq!(parts, [json!({"text": "Hmm."})]);
 }

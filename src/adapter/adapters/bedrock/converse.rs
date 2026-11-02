@@ -4,8 +4,8 @@
 //! work lives here. Publisher-specific bits (reasoning budget, etc.) go under
 //! `additionalModelRequestFields` via [`BedrockPublisher`].
 
-use crate::adapter::adapters::anthropic::{AnthropicAdapter, AnthropicModel, insert_anthropic_reasoning};
 use crate::adapter::AdapterKind;
+use crate::adapter::adapters::anthropic::{AnthropicAdapter, AnthropicModel, insert_anthropic_reasoning};
 use crate::chat::{
 	Binary, BinarySource, ChatOptionsSet, ChatRequest, ChatResponse, ChatRole, ContentPart, MessageContent,
 	ReasoningEffort, StopReason, ThoughtOrigin, ThoughtSignature, Tool, ToolCall, ToolName, Usage,
@@ -753,7 +753,8 @@ mod tests {
 	/// A signature as this adapter kind would have captured it (connection `None`).
 	fn own_signature(signature: &str) -> ContentPart {
 		ContentPart::ThoughtSignature(
-			ThoughtSignature::new(signature).with_origin(ThoughtOrigin::new(&ModelIden::new(AdapterKind::BedrockApi, "m"), None)),
+			ThoughtSignature::new(signature)
+				.with_origin(ThoughtOrigin::new(&ModelIden::new(AdapterKind::BedrockApi, "m"), None)),
 		)
 	}
 
@@ -938,10 +939,10 @@ mod tests {
 		// -- Setup & Fixtures
 		let mut call = tool_call();
 		call.thought_signatures = Some(vec!["blob".to_string()]);
-		let foreign = ContentPart::ThoughtSignature(ThoughtSignature::new("sig-x").with_origin(ThoughtOrigin::new(
-			&ModelIden::new(AdapterKind::Anthropic, "m"),
-			None,
-		)));
+		let foreign = ContentPart::ThoughtSignature(
+			ThoughtSignature::new("sig-x")
+				.with_origin(ThoughtOrigin::new(&ModelIden::new(AdapterKind::Anthropic, "m"), None)),
+		);
 		let assistant = ChatMessage::assistant(MessageContent::from_parts(vec![
 			foreign,
 			ContentPart::ReasoningContent("thinking".to_string()),

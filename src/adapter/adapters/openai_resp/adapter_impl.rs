@@ -342,7 +342,9 @@ impl Adapter for OpenAIRespAdapter {
 			// `reasoning` items carry the encrypted continuation blob; tag it with its issuer.
 			let parts = ContentPart::from_resp_output_item(output_item)?;
 			content.extend(parts.into_iter().map(|part| match part {
-				ContentPart::ThoughtSignature(sig) => ContentPart::ThoughtSignature(sig.with_origin(thought_origin.clone())),
+				ContentPart::ThoughtSignature(sig) => {
+					ContentPart::ThoughtSignature(sig.with_origin(thought_origin.clone()))
+				}
 				other => other,
 			}));
 		}
