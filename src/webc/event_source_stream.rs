@@ -38,6 +38,7 @@ impl EventSourceStream {
 	/// Sets the frame tap that feeds the user `ChatFrameSink`.
 	/// No-op path when `frame_tap` is `None` (i.e., no sink configured).
 	pub fn with_frame_tap(mut self, frame_tap: Option<FrameTap>) -> Self {
+		self.inner = self.inner.with_response_tap(frame_tap.clone());
 		self.frame_tap = frame_tap;
 		self
 	}

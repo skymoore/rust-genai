@@ -32,6 +32,10 @@ pub struct WebStream {
 	// Only set for the delimited modes; in `Sse` mode the `EventSourceStream` wrapper taps
 	// instead, so the sink sees `(event, data)` rather than the undecoded event block.
 	frame_tap: Option<FrameTap>,
+	// Receives the HTTP response head (`ChatFrameSink::on_response`). Set in every mode: in
+	// `Sse` mode the `EventSourceStream` wrapper owns the frame tap but hands a clone here,
+	// because only this transport sees the `reqwest::Response`.
+	response_tap: Option<FrameTap>,
 }
 
 pub enum StreamMode {
@@ -54,11 +58,19 @@ impl WebStream {
 			remaining_messages: None,
 			utf8_carry: Vec::new(),
 			frame_tap: None,
+			response_tap: None,
 		}
 	}
 
 	pub fn with_frame_tap(mut self, frame_tap: Option<FrameTap>) -> Self {
+		self.response_tap = frame_tap.clone();
 		self.frame_tap = frame_tap;
+		self
+	}
+
+	/// Sets only the response-head tap (the `Sse` wrapper taps frames itself).
+	pub(crate) fn with_response_tap(mut self, response_tap: Option<FrameTap>) -> Self {
+		self.response_tap = response_tap;
 		self
 	}
 
@@ -83,6 +95,7 @@ impl WebStream {
 			remaining_messages: None,
 			utf8_carry: Vec::new(),
 			frame_tap: None,
+			response_tap: None,
 		}
 	}
 }
@@ -106,6 +119,9 @@ impl Stream for WebStream {
 					Poll::Ready(Ok(response)) => {
 						// Check HTTP status before proceeding with the stream
 						let status = response.status();
+						if let Some(tap) = this.response_tap.as_ref() {
+							tap.on_response(status, response.headers());
+						}
 						if !status.is_success() {
 							this.response_future = None;
 							// For error responses, we need to read the body to get the error message
