@@ -53,6 +53,12 @@ impl FrameTap {
 		self.sink.on_frame(&self.ctx, frame);
 	}
 
+	/// Forwards the HTTP response head (status + headers) to the sink. Not latched: the
+	/// transport calls it once, when the response arrives.
+	pub(crate) fn on_response(&self, status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) {
+		self.sink.on_response(&self.ctx, status, headers);
+	}
+
 	/// Claims the terminal slot. `true` for the first caller only.
 	fn claim_terminal(&self) -> bool {
 		self.terminated
